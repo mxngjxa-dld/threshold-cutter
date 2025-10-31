@@ -34,7 +34,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Install the project dependencies (uv will create an isolated environment automatically):
 
 ```bash
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ## Running the Streamlit Application
@@ -43,7 +43,7 @@ uv pip install -r requirements.txt
 2. Start the application with uv:
 
 ```bash
-uv run streamlit run app/main.py
+uv run --dev streamlit run app/main.py
 ```
 
 3. Open the URL shown in the console (defaults to http://localhost:8502/) to interact with the UI.

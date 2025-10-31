@@ -21,3 +21,8 @@ pythonpath = [
     "."
 ]
 addopts = "-ra -q"
+
+[dependency-groups]
+dev = [
+    "watchdog>=6.0.0",
+]
