@@ -6,7 +6,7 @@ This README summarises the current implementation, how to run the app, how to ex
 
 ## Key Capabilities
 
-- Upload logits or probability CSVs in "wide" or "long" form and automatically validate schema.
+- Upload logits or probability CSVs in "wide" or "long" form, automatically infer column mappings, and optionally override selections via the sidebar.
 - Apply activation functions (none, softmax, sigmoid, sigmoid_5) with per-class thresholding and fallbacks.
 - Compute confusion matrices, ROC/PR curves, aggregated metrics, and Youden's J statistics with robust handling for zero-support classes.
 - Export metrics, ROC figures, and prediction CSVs with consistent timestamps.
@@ -21,6 +21,7 @@ This README summarises the current implementation, how to run the app, how to ex
 - [`app/utils/plots.py`](app/utils/plots.py) — Confusion matrix and ROC figure generation.
 - [`app/utils/exports.py`](app/utils/exports.py) — Metrics, figures, and predictions export helpers.
 - [`tests/test_metrics.py`](tests/test_metrics.py) & [`tests/test_thresholds.py`](tests/test_thresholds.py) — Focused regression coverage for metrics and threshold edge cases.
+- [`tests/test_data_io.py`](tests/test_data_io.py) — Column inference, selection, and score matrix preparation coverage.
 - [`tests/generate_synthetic_data.py`](tests/generate_synthetic_data.py) — CLI generator for synthetic datasets with optional edge-case injection.
 
 ## Environment Setup
@@ -43,7 +44,8 @@ uv sync
 2. Start the application with uv:
 
 ```bash
-uv run --dev streamlit run app/main.py
+source .venv/bin/activate
+streamlit run app/main.py
 ```
 
 3. Open the URL shown in the console (defaults to http://localhost:8502/) to interact with the UI.
@@ -59,19 +61,31 @@ Use this checklist while validating the UI with large synthetic datasets (e.g. `
 - Confusion matrix, ROC overlays, and PR curves render without errors at 50k+ rows.
 - Exports (metrics, ROC figures, confusion matrix, predictions) write files into [`app/outputs/`](app/outputs/) without exceptions.
 
+## Column Mapping Workflow
+
+A dedicated **Column Mapping** panel in the sidebar now guides dataset setup:
+
+1. The app inspects the uploaded CSV and proposes defaults for layout (wide vs. long), true label, sample identifier, and score columns.
+2. You can override any proposed column with dropdowns and multiselects—ideal when headers differ from the defaults (e.g. `ground_truth`, `probability`, `pred_label`).
+3. Changing mappings resets cached thresholds and filters to keep the UI aligned with the current dataset.
+
+The resulting selection is passed to [`app/utils/data_io.py`](app/utils/data_io.py) through [`ColumnSelection`](app/utils/data_io.py#L52) so downstream validation and preprocessing stay consistent.
+
 ## Data Format
 
 ### Wide Format
 
-- Required columns: `true_label`, `predicted_class`, and one or more `logit_{class_name}` columns.
+- Recommended columns: a true-label column plus one score/logit column per class (`score_{class_name}`/`logit_{class_name}` etc.).
 - Optional columns: sample identifiers or metadata (retained in exports).
-- Example header: `sample_id,true_label,logit_class_00,logit_class_01,...`.
+- Example header: `sample_id,true_label,score_class_00,score_class_01,...`.
+- If your headers differ, use the Column Mapping panel to identify the true label and score columns explicitly.
 
 ### Long Format
 
-- Required columns: `true_label`, `predicted_category`, `logit_score`.
-- Optional columns: `sample_id` (used to reconstruct wide matrices) plus any additional metadata.
-- Each row encodes a (sample, class) pair; the loader pivots the data into wide matrices automatically.
+- Recommended columns: true label, predicted class/category, numeric score/logit per row.
+- Optional columns: sample identifier for grouping repeated rows, plus any additional metadata.
+- Each row encodes a (sample, class) pair; the loader pivots to wide matrices automatically.
+- Override the predicted class, score, and sample identifier selections in the Column Mapping panel when the defaults do not match.
 
 Data validation enforces non-empty datasets, consistent class coverage, and infers class order from observed columns. Missing logit values are imputed to `-inf` before activation to avoid threshold leakage.
 
@@ -114,7 +128,7 @@ Generated files are written to the supplied `--output-dir` as `{prefix}_wide.csv
 Run the focused regression suite with uv:
 
 ```bash
-uv run pytest tests/test_metrics.py tests/test_thresholds.py -v
+uv run pytest tests/test_metrics.py tests/test_thresholds.py tests/test_data_io.py -v
 ```
 
 Common targeted invocations:
@@ -124,6 +138,8 @@ uv run pytest tests/test_metrics.py::test_per_class_roc_and_j_handles_missing_su
 uv run pytest tests/test_metrics.py::test_create_metrics_summary -v
 uv run pytest tests/test_thresholds.py::test_compute_optimal_thresholds_handles_missing_support -v
 uv run pytest tests/test_thresholds.py::test_select_predicted_class_with_no_valid_scores -v
+uv run pytest tests/test_data_io.py::test_validate_data_with_explicit_wide_selection -v
+uv run pytest tests/test_data_io.py::test_validate_data_with_explicit_long_selection -v
 ```
 
 ## Performance Tips

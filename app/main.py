@@ -13,9 +13,11 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 
 from utils.activations import apply_activation
 from utils.data_io import (
+    ColumnSelection,
     DataMetadata,
     ROW_INDEX_COLUMN,
     get_majority_class,
+    infer_column_candidates,
     prepare_score_matrix,
     validate_data,
 )
@@ -61,11 +63,14 @@ def parse_uploaded_csv(file_bytes: bytes, delimiter: str | None) -> pd.DataFrame
 
 
 @st.cache_data(show_spinner=False)
-def prepare_dataset(df: pd.DataFrame) -> dict[str, object]:
+def prepare_dataset(
+    df: pd.DataFrame,
+    selection: ColumnSelection | None,
+) -> dict[str, object]:
     """
     Validate raw dataframe and return core artefacts for downstream processing.
     """
-    metadata = validate_data(df)
+    metadata = validate_data(df, column_selection=selection)
     scores, index = prepare_score_matrix(
         df,
         metadata.classes,
@@ -162,21 +167,27 @@ def _align_true_labels(
     metadata: DataMetadata,
     index: pd.Index,
 ) -> np.ndarray:
+    label_column = metadata.true_label_column
+    if label_column not in df.columns:
+        raise KeyError(
+            f"True label column '{label_column}' not found in uploaded data."
+        )
+
     if metadata.format == "wide":
-        aligned = df.loc[index, "true_label"]
+        aligned = df.loc[index, label_column]
         return aligned.to_numpy()
 
     id_col = metadata.sample_id_column
     if id_col and id_col in df.columns:
         label_series = (
-            df[[id_col, "true_label"]]
+            df[[id_col, label_column]]
             .drop_duplicates(subset=id_col, keep="first")
-            .set_index(id_col)["true_label"]
+            .set_index(id_col)[label_column]
         )
         aligned = label_series.reindex(index)
         return aligned.to_numpy()
 
-    series = df["true_label"].reset_index(drop=True)
+    series = df[label_column].reset_index(drop=True)
     if len(series) == len(index):
         return series.to_numpy()
 
@@ -427,13 +438,167 @@ def main() -> None:
         st.session_state["class_thresholds"] = {}
         st.session_state["class_filter"] = []
         st.session_state["fallback_class"] = None
+        st.session_state.pop("column_mapping_signature", None)
+        for key in list(st.session_state.keys()):
+            if key.startswith("threshold_") or key.startswith("column_mapping_"):
+                del st.session_state[key]
+
+    try:
+        column_candidates = infer_column_candidates(df)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to infer column mappings: {exc}")
+        return
+
+    format_options = ["wide", "long"]
+    stored_format = st.session_state.get("column_mapping_format", column_candidates.default_format)
+    if stored_format not in format_options:
+        stored_format = column_candidates.default_format
+
+    true_label_options = list(column_candidates.true_label_options)
+    if not true_label_options:
+        true_label_options = list(df.columns)
+
+    with st.sidebar:
+        st.header("Column Mapping")
+        format_choice = st.radio(
+            "Data layout",
+            options=format_options,
+            index=format_options.index(stored_format),
+            key="column_mapping_format",
+            help="Select whether the uploaded data is organised in wide or long format.",
+        )
+
+        true_label_default = st.session_state.get("column_mapping_true_label", column_candidates.true_label_default)
+        if true_label_default not in true_label_options:
+            true_label_default = true_label_options[0]
+        true_label_index = true_label_options.index(true_label_default)
+        true_label_column = st.selectbox(
+            "True label column",
+            options=true_label_options,
+            index=true_label_index,
+            key="column_mapping_true_label",
+            help="Column containing ground-truth labels.",
+        )
+
+        remaining_columns = [col for col in df.columns if col != true_label_column]
+
+        sample_id_default = st.session_state.get(
+            "column_mapping_sample_id",
+            column_candidates.sample_id_default or "<None>",
+        )
+        sample_id_options = ["<None>"] + remaining_columns
+        if sample_id_default not in sample_id_options:
+            sample_id_default = "<None>"
+        sample_id_index = sample_id_options.index(sample_id_default)
+        sample_id_choice = st.selectbox(
+            "Sample identifier column",
+            options=sample_id_options,
+            index=sample_id_index,
+            key="column_mapping_sample_id",
+            help="Optional column used to align long-format rows belonging to the same sample.",
+        )
+        sample_id_column = None if sample_id_choice == "<None>" else sample_id_choice
+
+        long_class_column: str | None = None
+        long_score_column: str | None = None
+        wide_columns: list[str] = []
+
+        if format_choice == "wide":
+            preferred_wide = [col for col in column_candidates.wide_score_options if col in remaining_columns]
+            fallback_wide = [col for col in remaining_columns if col not in preferred_wide]
+            wide_options = preferred_wide + fallback_wide
+            if "column_mapping_wide_scores" in st.session_state:
+                current_wide = [
+                    col for col in st.session_state["column_mapping_wide_scores"] if col in wide_options
+                ]
+            else:
+                current_wide = list(column_candidates.wide_score_default)
+            wide_columns = st.multiselect(
+                "Score columns",
+                options=wide_options,
+                default=current_wide,
+                key="column_mapping_wide_scores",
+                help="Numeric score columns used to build the per-class score matrix.",
+            )
+            if len(wide_columns) < 2:
+                st.info("Select at least two score columns for wide-format datasets.")
+        else:
+            preferred_class = [col for col in column_candidates.long_class_options if col in remaining_columns]
+            fallback_class = [col for col in remaining_columns if col not in preferred_class]
+            long_class_options = preferred_class + fallback_class
+            if not long_class_options:
+                long_class_options = remaining_columns
+            if "column_mapping_long_class" in st.session_state and st.session_state["column_mapping_long_class"] not in long_class_options:
+                del st.session_state["column_mapping_long_class"]
+            long_class_default = st.session_state.get(
+                "column_mapping_long_class",
+                column_candidates.long_class_default or (long_class_options[0] if long_class_options else None),
+            )
+            if long_class_default not in long_class_options and long_class_options:
+                long_class_default = long_class_options[0]
+            long_class_index = long_class_options.index(long_class_default) if long_class_default in long_class_options else 0
+            long_class_column = st.selectbox(
+                "Predicted class column",
+                options=long_class_options,
+                index=long_class_index,
+                key="column_mapping_long_class",
+                help="Column providing the predicted class per row.",
+            )
+
+            score_candidates = [col for col in column_candidates.long_score_options if col in remaining_columns]
+            fallback_score = [col for col in remaining_columns if col not in score_candidates]
+            long_score_options = [col for col in score_candidates + fallback_score if col != long_class_column]
+            if not long_score_options:
+                long_score_options = [col for col in remaining_columns if col != long_class_column]
+            if not long_score_options:
+                st.error("Unable to determine a score column; please add a numeric score column to the dataset.")
+                return
+            if "column_mapping_long_score" in st.session_state and st.session_state["column_mapping_long_score"] not in long_score_options:
+                del st.session_state["column_mapping_long_score"]
+            long_score_default = st.session_state.get(
+                "column_mapping_long_score",
+                column_candidates.long_score_default or long_score_options[0],
+            )
+            if long_score_default not in long_score_options:
+                long_score_default = long_score_options[0]
+            long_score_index = long_score_options.index(long_score_default)
+            long_score_column = st.selectbox(
+                "Score column",
+                options=long_score_options,
+                index=long_score_index,
+                key="column_mapping_long_score",
+                help="Numeric score for the predicted class.",
+            )
+
+    column_selection = ColumnSelection(
+        format=format_choice,
+        true_label=true_label_column,
+        wide_score_columns=tuple(wide_columns) if format_choice == "wide" else (),
+        long_class_column=long_class_column if format_choice == "long" else None,
+        long_score_column=long_score_column if format_choice == "long" else None,
+        sample_id_column=sample_id_column,
+    )
+
+    mapping_signature = (
+        column_selection.format,
+        column_selection.true_label,
+        column_selection.sample_id_column,
+        column_selection.long_class_column,
+        column_selection.long_score_column,
+        column_selection.wide_score_columns,
+    )
+    if st.session_state.get("column_mapping_signature") != mapping_signature:
+        st.session_state["column_mapping_signature"] = mapping_signature
+        st.session_state["class_thresholds"] = {}
+        st.session_state["class_filter"] = []
+        st.session_state["fallback_class"] = None
         for key in list(st.session_state.keys()):
             if key.startswith("threshold_"):
                 del st.session_state[key]
 
     with st.spinner("Preparing dataset..."):
         try:
-            data_bundle = prepare_dataset(df)
+            data_bundle = prepare_dataset(df, column_selection)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Data validation failed: {exc}")
             return

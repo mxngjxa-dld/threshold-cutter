@@ -5,7 +5,7 @@ The stylesheet assumes injection via st.markdown(..., unsafe_allow_html=True).
 
 /* Root typography and base colours */
 :root {
-    --primary-font: "Roboto Mono", "Menlo", "Inconsolata", monospace;
+    --primary-font: "Menlo", monospace;
     --background-dark: #0b1e26;
     --background-light: #f4f8fb;
     --accent: #1f8ac0;
