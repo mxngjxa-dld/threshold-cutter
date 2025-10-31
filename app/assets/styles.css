@@ -1,0 +1,173 @@
+/*
+Streamlit global styling overrides for the multiclass threshold tuner.
+The stylesheet assumes injection via st.markdown(..., unsafe_allow_html=True).
+*/
+
+/* Root typography and base colours */
+:root {
+    --primary-font: "Roboto Mono", "Menlo", "Inconsolata", monospace;
+    --background-dark: #0b1e26;
+    --background-light: #f4f8fb;
+    --accent: #1f8ac0;
+    --accent-muted: #8fc6de;
+    --card-bg: rgba(255, 255, 255, 0.92);
+    --border-colour: rgba(31, 138, 192, 0.12);
+    --divider-colour: rgba(15, 34, 44, 0.18);
+}
+
+html, body, [class*="css"] {
+    font-family: var(--primary-font);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    background-color: var(--background-light);
+    color: #0f222c;
+}
+
+/* Ensure Streamlit markdown and widgets inherit the monospace font */
+section.main, .stMarkdown, .stText, .stSelectbox, .stSlider, .stMultiSelect, .stButton, .stNumberInput, .stCheckbox {
+    font-family: var(--primary-font);
+}
+
+/* Sidebar styling */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(11, 30, 38, 0.95) 0%, rgba(11, 30, 38, 0.88) 100%);
+    border-right: 1px solid var(--border-colour);
+    box-shadow: 2px 0 18px rgba(15, 34, 44, 0.35);
+    padding: 1.6rem 1.2rem;
+}
+
+[data-testid="stSidebar"] * {
+    color: #ecf4f8;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent-muted);
+}
+
+[data-testid="stSidebar"] .stSlider > div > div > div > div {
+    background-color: var(--accent);
+}
+
+[data-testid="stSidebar"] .stCheckbox,
+[data-testid="stSidebar"] .stSelectbox,
+[data-testid="stSidebar"] .stMultiSelect {
+    background-color: rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid rgba(140, 198, 222, 0.35);
+}
+
+/* Main area layout */
+section.main > div {
+    padding: 1.5rem 2rem 3rem;
+}
+
+.stApp header {
+    background: transparent;
+}
+
+.main-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    border: 1px solid var(--border-colour);
+    padding: 1.4rem 1.8rem;
+    box-shadow: 0 15px 40px rgba(15, 34, 44, 0.08);
+    margin-bottom: 1.5rem;
+}
+
+.metric-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.2rem;
+}
+
+.metric-card {
+    border: 1px solid var(--border-colour);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.metric-card h3 {
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.4rem;
+    color: #326a82;
+}
+
+.metric-card .value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #0b1e26;
+}
+
+/* Tables for Youden's J display */
+table.youden-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.8rem;
+    font-size: 0.92rem;
+}
+
+table.youden-table thead {
+    background-color: rgba(31, 138, 192, 0.12);
+}
+
+table.youden-table th,
+table.youden-table td {
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--divider-colour);
+    text-align: left;
+}
+
+table.youden-table tbody tr:nth-child(even) {
+    background-color: rgba(255, 255, 255, 0.65);
+}
+
+table.youden-table tbody tr:hover {
+    background-color: rgba(31, 138, 192, 0.08);
+}
+
+/* Download buttons section */
+.download-buttons {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    margin-top: 1.2rem;
+}
+
+.download-buttons .stButton button {
+    border-radius: 50px;
+    background-color: var(--accent);
+    border: none;
+    padding: 0.45rem 1.3rem;
+    color: #f8fcff;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    box-shadow: 0 6px 18px rgba(31, 138, 192, 0.22);
+}
+
+.download-buttons .stButton button:hover {
+    background-color: #16668a;
+}
+
+/* Plot containers */
+.plot-container {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.2rem;
+    border: 1px solid var(--border-colour);
+    margin-bottom: 1.5rem;
+}
+
+/* Ensure Streamlit info/warning boxes remain legible on dark backdrop */
+.stAlert {
+    font-family: var(--primary-font);
+    letter-spacing: 0.04em;
+}

@@ -1,0 +1,23 @@
+[project]
+name = "threshold-cutter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "altair>=5.5.0",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "plotly>=6.3.1",
+    "pytest>=8.4.2",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "streamlit>=1.51.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+addopts = "-ra -q"
