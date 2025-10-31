@@ -48,6 +48,9 @@ TRUE_LABEL_COLUMN_CANDIDATES = (
     "y_true",
 )
 
+SCORE_CLIP_ABS = 1e12
+MISSING_SCORE_FILL_VALUE = -SCORE_CLIP_ABS
+
 
 @dataclass(frozen=True)
 class ColumnSelection:
@@ -379,10 +382,20 @@ def prepare_score_matrix(
 
 def handle_missing_scores(scores: np.ndarray | pd.DataFrame) -> np.ndarray:
     """
-    Replace NaN scores with -inf to ensure they are ignored post-activation.
+    Sanitise score matrices by replacing NaN/Inf values with large finite sentinels.
+
+    This prevents downstream routines (e.g. ``roc_curve``) from failing while still
+    ensuring missing scores are ignored after activation/thresholding.
     """
     array = np.asarray(scores, dtype=np.float64)
-    np.nan_to_num(array, nan=-np.inf, copy=False)
+    np.nan_to_num(
+        array,
+        nan=MISSING_SCORE_FILL_VALUE,
+        posinf=SCORE_CLIP_ABS,
+        neginf=MISSING_SCORE_FILL_VALUE,
+        copy=False,
+    )
+    np.clip(array, -SCORE_CLIP_ABS, SCORE_CLIP_ABS, out=array)
     return array
 
 
