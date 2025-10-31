@@ -760,7 +760,7 @@ def main() -> None:
         f1_macro=summary.macro_f1,
     )
     st.markdown("### Confusion Matrix")
-    st.pyplot(confusion_fig, use_container_width=True)
+    st.pyplot(confusion_fig, width='stretch')
     plt.close(confusion_fig)
 
     st.markdown("### ROC Curves")
@@ -770,11 +770,11 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if "combined" in roc_figures:
-        st.pyplot(roc_figures["combined"], use_container_width=True)
+        st.pyplot(roc_figures["combined"], width='stretch')
     for cls, fig in roc_figures.items():
         if cls == "combined":
             continue
-        st.pyplot(fig, use_container_width=False)
+        st.pyplot(fig, width='content')
     for fig in roc_figures.values():
         plt.close(fig)
 
@@ -789,7 +789,7 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if pr_fig is not None:
-        st.pyplot(pr_fig, use_container_width=True)
+        st.pyplot(pr_fig, width='stretch')
         plt.close(pr_fig)
     else:
         st.info("Precision-Recall curves unavailable: no positive support for selected classes.")
