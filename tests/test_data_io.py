@@ -1,11 +1,9 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from app.utils.data_io import (
     ColumnCandidates,
     ColumnSelection,
-    DataMetadata,
     infer_column_candidates,
     prepare_score_matrix,
     validate_data,
