@@ -17,7 +17,7 @@ from sklearn.metrics import confusion_matrix
 sns.set_theme(context="notebook", style="whitegrid")
 
 
-DEFAULT_FONT_FAMILY = "Roboto Mono, Menlo, Inconsolata, monospace"
+DEFAULT_FONT_FAMILY = "Menlo, monospace"
 FIGURE_DIR = Path("app") / "outputs" / "figures"
 
 
