@@ -35,7 +35,7 @@ from app.utils.thresholds import (
 )
 
 APP_TITLE = "Multiclass Threshold Tuner"
-ASSETS_DIR = Path(__file__).parent / "assets"
+ASSETS_DIR = Path(__file__).parent / "app/assets"
 STYLESHEET = ASSETS_DIR / "styles.css"
 ACTIVATION_OPTIONS = ["none", "softmax", "sigmoid", "sigmoid_5"]
 

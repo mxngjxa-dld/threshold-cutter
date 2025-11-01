@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_curve
 
-from .activations import ActivationType, apply_activation
+from app.utils.activations import ActivationType, apply_activation
 
 
 @dataclass(frozen=True)
