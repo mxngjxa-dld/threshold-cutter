@@ -24,5 +24,7 @@ addopts = "-ra -q"
 
 [dependency-groups]
 dev = [
+    "ruff>=0.14.3",
+    "ty>=0.0.1a25",
     "watchdog>=6.0.0",
 ]
