@@ -5,7 +5,7 @@ Metric computation helpers for the multiclass threshold tuner.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -134,7 +134,9 @@ def per_class_roc_and_j(
         best_idx = np.nanargmax(youden)
 
         class_auc = float(
-            auc(fpr, tpr) if np.isfinite(fpr).all() and np.isfinite(tpr).all() else np.nan
+            auc(fpr, tpr)
+            if np.isfinite(fpr).all() and np.isfinite(tpr).all()
+            else np.nan
         )
 
         records.append(
@@ -210,9 +212,7 @@ def create_metrics_summary(
     micro_auc, macro_auc = compute_micro_macro_auc(y_true, y_scores, classes)
 
     summary_df = per_class_df.copy()
-    summary_df["support_total"] = (
-        summary_df["support_pos"] + summary_df["support_neg"]
-    )
+    summary_df["support_total"] = summary_df["support_pos"] + summary_df["support_neg"]
     summary_df["auc"] = summary_df["auc"].astype(float)
 
     return MetricSummary(

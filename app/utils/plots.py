@@ -169,7 +169,9 @@ def plot_per_class_roc(
         figures[cls] = fig
 
         if needs_save:
-            filename = FIGURE_DIR / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
+            filename = (
+                FIGURE_DIR / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
+            )
             path = _ensure_output_dir(filename)
             fig.savefig(path, dpi=dpi, bbox_inches="tight")
 

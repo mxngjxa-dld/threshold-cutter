@@ -44,7 +44,9 @@ def test_predict_with_thresholds_basic(sample_scores):
 
 def test_select_predicted_class_with_no_valid_scores():
     masked = np.full((3, 2), -np.inf)
-    predictions = select_predicted_class(masked, fallback_class="fallback", classes=["a", "b"])
+    predictions = select_predicted_class(
+        masked, fallback_class="fallback", classes=["a", "b"]
+    )
     assert np.all(predictions == "fallback")
 
 

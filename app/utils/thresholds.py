@@ -113,7 +113,7 @@ def predict_with_thresholds(
     masked_scores = np.where(mask, activated, -np.inf)
 
     predictions = select_predicted_class(
-    masked_scores, fallback_class=fallback_class, classes=class_labels
+        masked_scores, fallback_class=fallback_class, classes=class_labels
     )
 
     return ThresholdResult(

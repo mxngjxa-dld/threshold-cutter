@@ -141,13 +141,19 @@ def infer_column_candidates(df: pd.DataFrame) -> ColumnCandidates:
     """
     columns = list(df.columns)
     if not columns:
-        raise ValueError("Column inference requires a dataframe with at least one column.")
+        raise ValueError(
+            "Column inference requires a dataframe with at least one column."
+        )
 
     numeric_columns = list(df.select_dtypes(include=[np.number]).columns)
-    string_like = list(df.select_dtypes(include=["object", "string", "category"]).columns)
+    string_like = list(
+        df.select_dtypes(include=["object", "string", "category"]).columns
+    )
     column_lookup = {col.lower(): col for col in columns}
 
-    true_label_default = _pick_first_available(column_lookup, TRUE_LABEL_COLUMN_CANDIDATES)
+    true_label_default = _pick_first_available(
+        column_lookup, TRUE_LABEL_COLUMN_CANDIDATES
+    )
     if true_label_default is None:
         true_label_default = string_like[0] if string_like else columns[0]
     true_label_options = tuple(columns)
@@ -156,35 +162,49 @@ def infer_column_candidates(df: pd.DataFrame) -> ColumnCandidates:
     if not long_class_candidates:
         long_class_candidates = [col for col in columns if col != true_label_default]
     long_class_lookup = {col.lower(): col for col in long_class_candidates}
-    long_class_default = _pick_first_available(long_class_lookup, CLASS_COLUMN_CANDIDATES)
+    long_class_default = _pick_first_available(
+        long_class_lookup, CLASS_COLUMN_CANDIDATES
+    )
     if long_class_default is None and long_class_candidates:
         long_class_default = long_class_candidates[0]
 
-    long_score_candidates = [col for col in numeric_columns if col != true_label_default]
+    long_score_candidates = [
+        col for col in numeric_columns if col != true_label_default
+    ]
     if not long_score_candidates:
         long_score_candidates = [col for col in columns if col != true_label_default]
     long_score_lookup = {col.lower(): col for col in long_score_candidates}
-    long_score_default = _pick_first_available(long_score_lookup, SCORE_COLUMN_CANDIDATES)
+    long_score_default = _pick_first_available(
+        long_score_lookup, SCORE_COLUMN_CANDIDATES
+    )
     if long_score_default is None and long_score_candidates:
         long_score_default = long_score_candidates[0]
 
     sample_id_candidates = [col for col in columns if col != true_label_default]
     sample_id_string_like = [
-        col for col in sample_id_candidates if col in string_like or pd.api.types.is_integer_dtype(df[col])
+        col
+        for col in sample_id_candidates
+        if col in string_like or pd.api.types.is_integer_dtype(df[col])
     ]
     if sample_id_string_like:
         sample_id_candidates = sample_id_string_like
     sample_id_lookup = {col.lower(): col for col in sample_id_candidates}
-    sample_id_default = _pick_first_available(sample_id_lookup, SAMPLE_ID_COLUMN_CANDIDATES)
+    sample_id_default = _pick_first_available(
+        sample_id_lookup, SAMPLE_ID_COLUMN_CANDIDATES
+    )
 
     detected_wide = list(_auto_detect_wide_columns(df, true_label_default))
     wide_score_default = tuple(dict.fromkeys(detected_wide))
-    wide_score_candidates = [col for col in numeric_columns if col != true_label_default]
+    wide_score_candidates = [
+        col for col in numeric_columns if col != true_label_default
+    ]
     if not wide_score_candidates:
         wide_score_candidates = [col for col in columns if col != true_label_default]
     wide_score_options = tuple(wide_score_candidates)
 
-    default_format: Literal["wide", "long"] = "wide" if len(wide_score_default) >= 2 else "long"
+    default_format: Literal["wide", "long"] = (
+        "wide" if len(wide_score_default) >= 2 else "long"
+    )
 
     return ColumnCandidates(
         default_format=default_format,
@@ -220,9 +240,13 @@ def validate_data(
                 f"Selected true label column '{true_label_column}' is not present in the dataset."
             )
     else:
-        true_label_column = _pick_first_available(column_lookup, TRUE_LABEL_COLUMN_CANDIDATES)
+        true_label_column = _pick_first_available(
+            column_lookup, TRUE_LABEL_COLUMN_CANDIDATES
+        )
         if true_label_column is None:
-            string_candidates = list(df.select_dtypes(include=["object", "string", "category"]).columns)
+            string_candidates = list(
+                df.select_dtypes(include=["object", "string", "category"]).columns
+            )
             if not string_candidates:
                 raise ValueError(
                     "Input data must contain a string-like true label column or you must specify one explicitly."
@@ -245,7 +269,9 @@ def validate_data(
 
     wide_columns: Sequence[str] = ()
     if force_format == "wide":
-        wide_columns = column_selection.wide_score_columns or _auto_detect_wide_columns(df, true_label_column)
+        wide_columns = column_selection.wide_score_columns or _auto_detect_wide_columns(
+            df, true_label_column
+        )
     elif force_format != "long":
         wide_columns = _auto_detect_wide_columns(df, true_label_column)
 
@@ -253,7 +279,9 @@ def validate_data(
         missing = [col for col in wide_columns if col not in df.columns]
         if missing:
             missing_str = ", ".join(sorted(missing))
-            raise ValueError(f"Selected score columns not found in dataframe: {missing_str}")
+            raise ValueError(
+                f"Selected score columns not found in dataframe: {missing_str}"
+            )
         wide_map = _build_wide_map_from_columns(wide_columns)
         if not wide_map:
             raise ValueError("No class score columns detected for wide-format data.")
@@ -349,7 +377,9 @@ def prepare_score_matrix(
         class_column = metadata.long_class_column
         score_column = metadata.long_score_column
         if class_column is None or score_column is None:
-            raise RuntimeError("Long-format metadata missing required column references.")
+            raise RuntimeError(
+                "Long-format metadata missing required column references."
+            )
 
         working_df = df.copy()
         index_column = metadata.sample_id_column
@@ -446,7 +476,9 @@ def _build_wide_map_from_columns(columns: Sequence[str]) -> dict[str, str]:
     return mapping
 
 
-def _auto_detect_wide_columns(df: pd.DataFrame, true_label_column: str) -> tuple[str, ...]:
+def _auto_detect_wide_columns(
+    df: pd.DataFrame, true_label_column: str
+) -> tuple[str, ...]:
     detected: list[str] = []
     for column in df.columns:
         if column == true_label_column:

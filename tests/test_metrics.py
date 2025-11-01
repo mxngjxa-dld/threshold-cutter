@@ -90,7 +90,9 @@ def test_create_metrics_summary(sample_outputs):
     assert summary.youden_by_class.index.tolist() == list(classes)
 
     support_totals = summary.per_class["support_total"]
-    expected_supports = summary.per_class["support_pos"] + summary.per_class["support_neg"]
+    expected_supports = (
+        summary.per_class["support_pos"] + summary.per_class["support_neg"]
+    )
     pd.testing.assert_series_equal(support_totals, expected_supports, check_names=False)
     assert (support_totals == len(y_true)).all()
 

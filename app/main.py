@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import io
-import json
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +14,6 @@ from utils.activations import apply_activation
 from utils.data_io import (
     ColumnSelection,
     DataMetadata,
-    ROW_INDEX_COLUMN,
     get_majority_class,
     infer_column_candidates,
     prepare_score_matrix,
@@ -212,7 +210,11 @@ def _compute_auto_threshold_map(
 ) -> dict[str, float]:
     auto_map: dict[str, float] = {}
     for cls in classes:
-        value = float(optimal_df.loc[cls, "optimal_threshold"]) if cls in optimal_df.index else float("nan")
+        value = (
+            float(optimal_df.loc[cls, "optimal_threshold"])
+            if cls in optimal_df.index
+            else float("nan")
+        )
         if not np.isfinite(value):
             value = default_value
         auto_map[cls] = value
@@ -282,7 +284,9 @@ def _render_youden_table(
     summary: MetricSummary,
     selected_classes: Sequence[str],
 ) -> None:
-    display_df = summary.per_class.loc[selected_classes, ["optimal_threshold", "youden_j", "tpr", "fpr", "auc"]]
+    display_df = summary.per_class.loc[
+        selected_classes, ["optimal_threshold", "youden_j", "tpr", "fpr", "auc"]
+    ]
     display_df = display_df.rename(
         columns={
             "optimal_threshold": "optimal_threshold",
@@ -369,9 +373,7 @@ def _handle_downloads(
             "youden": youden,
         }
         paths = save_classification_report(report, timestamp=timestamp)
-        st.sidebar.success(
-            f"Metrics saved: {paths['json'].name}, {paths['csv'].name}"
-        )
+        st.sidebar.success(f"Metrics saved: {paths['json'].name}, {paths['csv'].name}")
 
     if st.sidebar.button("Save confusion matrix image"):
         path = save_confusion_matrix_image(confusion_fig, timestamp=timestamp)
@@ -398,7 +400,9 @@ def main() -> None:
     ensure_session_defaults()
 
     st.title(APP_TITLE)
-    st.caption("Interactive Streamlit application for multiclass threshold tuning and evaluation.")
+    st.caption(
+        "Interactive Streamlit application for multiclass threshold tuning and evaluation."
+    )
 
     with st.sidebar:
         st.header("Dataset")
@@ -450,7 +454,9 @@ def main() -> None:
         return
 
     format_options = ["wide", "long"]
-    stored_format = st.session_state.get("column_mapping_format", column_candidates.default_format)
+    stored_format = st.session_state.get(
+        "column_mapping_format", column_candidates.default_format
+    )
     if stored_format not in format_options:
         stored_format = column_candidates.default_format
 
@@ -468,7 +474,9 @@ def main() -> None:
             help="Select whether the uploaded data is organised in wide or long format.",
         )
 
-        true_label_default = st.session_state.get("column_mapping_true_label", column_candidates.true_label_default)
+        true_label_default = st.session_state.get(
+            "column_mapping_true_label", column_candidates.true_label_default
+        )
         if true_label_default not in true_label_options:
             true_label_default = true_label_options[0]
         true_label_index = true_label_options.index(true_label_default)
@@ -504,12 +512,20 @@ def main() -> None:
         wide_columns: list[str] = []
 
         if format_choice == "wide":
-            preferred_wide = [col for col in column_candidates.wide_score_options if col in remaining_columns]
-            fallback_wide = [col for col in remaining_columns if col not in preferred_wide]
+            preferred_wide = [
+                col
+                for col in column_candidates.wide_score_options
+                if col in remaining_columns
+            ]
+            fallback_wide = [
+                col for col in remaining_columns if col not in preferred_wide
+            ]
             wide_options = preferred_wide + fallback_wide
             if "column_mapping_wide_scores" in st.session_state:
                 current_wide = [
-                    col for col in st.session_state["column_mapping_wide_scores"] if col in wide_options
+                    col
+                    for col in st.session_state["column_mapping_wide_scores"]
+                    if col in wide_options
                 ]
             else:
                 current_wide = list(column_candidates.wide_score_default)
@@ -523,20 +539,35 @@ def main() -> None:
             if len(wide_columns) < 2:
                 st.info("Select at least two score columns for wide-format datasets.")
         else:
-            preferred_class = [col for col in column_candidates.long_class_options if col in remaining_columns]
-            fallback_class = [col for col in remaining_columns if col not in preferred_class]
+            preferred_class = [
+                col
+                for col in column_candidates.long_class_options
+                if col in remaining_columns
+            ]
+            fallback_class = [
+                col for col in remaining_columns if col not in preferred_class
+            ]
             long_class_options = preferred_class + fallback_class
             if not long_class_options:
                 long_class_options = remaining_columns
-            if "column_mapping_long_class" in st.session_state and st.session_state["column_mapping_long_class"] not in long_class_options:
+            if (
+                "column_mapping_long_class" in st.session_state
+                and st.session_state["column_mapping_long_class"]
+                not in long_class_options
+            ):
                 del st.session_state["column_mapping_long_class"]
             long_class_default = st.session_state.get(
                 "column_mapping_long_class",
-                column_candidates.long_class_default or (long_class_options[0] if long_class_options else None),
+                column_candidates.long_class_default
+                or (long_class_options[0] if long_class_options else None),
             )
             if long_class_default not in long_class_options and long_class_options:
                 long_class_default = long_class_options[0]
-            long_class_index = long_class_options.index(long_class_default) if long_class_default in long_class_options else 0
+            long_class_index = (
+                long_class_options.index(long_class_default)
+                if long_class_default in long_class_options
+                else 0
+            )
             long_class_column = st.selectbox(
                 "Predicted class column",
                 options=long_class_options,
@@ -545,15 +576,33 @@ def main() -> None:
                 help="Column providing the predicted class per row.",
             )
 
-            score_candidates = [col for col in column_candidates.long_score_options if col in remaining_columns]
-            fallback_score = [col for col in remaining_columns if col not in score_candidates]
-            long_score_options = [col for col in score_candidates + fallback_score if col != long_class_column]
+            score_candidates = [
+                col
+                for col in column_candidates.long_score_options
+                if col in remaining_columns
+            ]
+            fallback_score = [
+                col for col in remaining_columns if col not in score_candidates
+            ]
+            long_score_options = [
+                col
+                for col in score_candidates + fallback_score
+                if col != long_class_column
+            ]
             if not long_score_options:
-                long_score_options = [col for col in remaining_columns if col != long_class_column]
+                long_score_options = [
+                    col for col in remaining_columns if col != long_class_column
+                ]
             if not long_score_options:
-                st.error("Unable to determine a score column; please add a numeric score column to the dataset.")
+                st.error(
+                    "Unable to determine a score column; please add a numeric score column to the dataset."
+                )
                 return
-            if "column_mapping_long_score" in st.session_state and st.session_state["column_mapping_long_score"] not in long_score_options:
+            if (
+                "column_mapping_long_score" in st.session_state
+                and st.session_state["column_mapping_long_score"]
+                not in long_score_options
+            ):
                 del st.session_state["column_mapping_long_score"]
             long_score_default = st.session_state.get(
                 "column_mapping_long_score",
@@ -638,7 +687,10 @@ def main() -> None:
             help="Use class-wise Youden-optimal thresholds.",
         )
         min_thr, max_thr, step_thr = get_threshold_bounds(activation)
-        if "class_filter" not in st.session_state or not st.session_state["class_filter"]:
+        if (
+            "class_filter" not in st.session_state
+            or not st.session_state["class_filter"]
+        ):
             st.session_state["class_filter"] = list(classes)
 
         st.header("Fallback & Filtering")
@@ -669,8 +721,13 @@ def main() -> None:
 
     if auto_global:
         st.session_state["global_threshold"] = auto_global_value
-    if st.session_state["global_threshold"] < min_thr or st.session_state["global_threshold"] > max_thr:
-        st.session_state["global_threshold"] = float(np.clip(st.session_state["global_threshold"], min_thr, max_thr))
+    if (
+        st.session_state["global_threshold"] < min_thr
+        or st.session_state["global_threshold"] > max_thr
+    ):
+        st.session_state["global_threshold"] = float(
+            np.clip(st.session_state["global_threshold"], min_thr, max_thr)
+        )
 
     with st.sidebar:
         global_threshold = st.slider(
@@ -691,7 +748,9 @@ def main() -> None:
                 value = auto_threshold_map.get(cls, global_threshold)
                 st.session_state[key] = value
             else:
-                st.session_state.setdefault(key, class_thresholds_state.get(cls, global_threshold))
+                st.session_state.setdefault(
+                    key, class_thresholds_state.get(cls, global_threshold)
+                )
             slider_value = st.slider(
                 f"{cls}",
                 min_value=float(min_thr),
@@ -744,8 +803,12 @@ def main() -> None:
     st.subheader("Evaluation Overview")
     _render_metric_cards(summary)
 
-    micro_auc_text = f"{summary.micro_auc:.4f}" if summary.micro_auc is not None else "N/A"
-    macro_auc_text = f"{summary.macro_auc:.4f}" if summary.macro_auc is not None else "N/A"
+    micro_auc_text = (
+        f"{summary.micro_auc:.4f}" if summary.micro_auc is not None else "N/A"
+    )
+    macro_auc_text = (
+        f"{summary.macro_auc:.4f}" if summary.macro_auc is not None else "N/A"
+    )
     st.markdown(
         f"**Micro AUC:** {micro_auc_text} &nbsp;&nbsp;·&nbsp;&nbsp; **Macro AUC:** {macro_auc_text}"
     )
@@ -760,7 +823,7 @@ def main() -> None:
         f1_macro=summary.macro_f1,
     )
     st.markdown("### Confusion Matrix")
-    st.pyplot(confusion_fig, width='stretch')
+    st.pyplot(confusion_fig, width="stretch")
     plt.close(confusion_fig)
 
     st.markdown("### ROC Curves")
@@ -770,11 +833,11 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if "combined" in roc_figures:
-        st.pyplot(roc_figures["combined"], width='stretch')
+        st.pyplot(roc_figures["combined"], width="stretch")
     for cls, fig in roc_figures.items():
         if cls == "combined":
             continue
-        st.pyplot(fig, width='content')
+        st.pyplot(fig, width="content")
     for fig in roc_figures.values():
         plt.close(fig)
 
@@ -789,10 +852,12 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if pr_fig is not None:
-        st.pyplot(pr_fig, width='stretch')
+        st.pyplot(pr_fig, width="stretch")
         plt.close(pr_fig)
     else:
-        st.info("Precision-Recall curves unavailable: no positive support for selected classes.")
+        st.info(
+            "Precision-Recall curves unavailable: no positive support for selected classes."
+        )
 
     _handle_downloads(
         summary=summary,
