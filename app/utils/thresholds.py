@@ -51,8 +51,10 @@ def _build_threshold_array(
         return np.full((1, len(classes)), float(default), dtype=np.float64)
 
     if isinstance(thresholds, Mapping):
+        # Cast thresholds to proper type
+        thresh_dict: dict[str, float | int] = dict(thresholds)  # type: ignore
         return np.array(
-            [[float(thresholds.get(cls, default)) for cls in classes]],
+            [[float(thresh_dict.get(cls, default)) for cls in classes]],
             dtype=np.float64,
         )
 

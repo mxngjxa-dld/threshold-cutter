@@ -35,48 +35,48 @@ def softmax(logits: np.ndarray, axis: int = -1) -> np.ndarray:
     np.ndarray
         Probability matrix with the same shape as ``logits``.
     """
-    scores = _as_float_array(logits)
 
-    if scores.ndim == 0:
+    if logits.ndim == 0:
         return np.array(1.0, dtype=np.float64)
 
-    max_scores = np.max(scores, axis=axis, keepdims=True)
-    stabilised = scores - max_scores
+    max_scores = np.max(logits, axis=axis, keepdims=True)
+    stabilised = logits - max_scores
     np.nan_to_num(stabilised, copy=False)
 
-    exp_scores = np.exp(stabilised)
-    sum_exp = np.sum(exp_scores, axis=axis, keepdims=True)
+    exp_logits = np.exp(stabilised)
+    sum_exp = np.sum(exp_logits, axis=axis, keepdims=True)
     sum_exp[sum_exp == 0.0] = 1.0  # prevent division by zero
 
-    probabilities = exp_scores / sum_exp
+    probabilities = exp_logits / sum_exp
     return probabilities
 
 
-def sigmoid(x: np.ndarray | list | tuple) -> np.ndarray:
+def sigmoid(logits: np.ndarray | list | tuple) -> np.ndarray:
     """
     Compute the logistic sigmoid elementwise in a numerically stable manner.
     """
-    z = _as_float_array(x)
-    result = np.empty_like(z, dtype=np.float64)
+    # Convert to ndarray first to ensure proper type for comparison
+    logits_array = _as_float_array(logits)
+    result = np.empty_like(logits_array, dtype=np.float64)
 
-    positive_mask = z >= 0
+    positive_mask = logits_array >= 0
     negative_mask = ~positive_mask
 
-    result[positive_mask] = 1.0 / (1.0 + np.exp(-z[positive_mask]))
+    result[positive_mask] = 1.0 / (1.0 + np.exp(-logits_array[positive_mask]))
 
-    exp_z = np.exp(z[negative_mask])
-    result[negative_mask] = exp_z / (1.0 + exp_z)
+    exp_logits = np.exp(logits_array[negative_mask])
+    result[negative_mask] = exp_logits / (1.0 + exp_logits)
 
     return result
 
 
-def sigmoid_5(x: np.ndarray | list | tuple) -> np.ndarray:
+def sigmoid_5(logits: np.ndarray | list | tuple) -> np.ndarray:
     """
     Custom sigmoid variant with a scale factor of 5:
         1 / (1 + exp(-x / 5))
     """
-    scaled = _as_float_array(x) / 5.0
-    return sigmoid(scaled)
+    scaled_logits = _as_float_array(logits) / 5.0
+    return sigmoid(scaled_logits)
 
 
 def apply_activation(
@@ -101,14 +101,16 @@ def apply_activation(
     """
     activation = (activation_type or "none").lower()
 
+    logits = _as_float_array(scores)
+
     if activation in {"none", "raw"}:
-        return _as_float_array(scores)
+        return logits
     if activation == "softmax":
-        return softmax(scores)
+        return softmax(logits)  # Ensure np.ndarray type
     if activation == "sigmoid":
-        return sigmoid(scores)
+        return sigmoid(logits)
     if activation in {"sigmoid_5", "sigmoid5"}:
-        return sigmoid_5(scores)
+        return sigmoid_5(logits)
 
     raise ValueError(
         f"Unsupported activation_type '{activation_type}'. "

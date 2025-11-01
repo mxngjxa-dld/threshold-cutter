@@ -10,8 +10,8 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import average_precision_score, precision_recall_curve
 
-from utils.activations import apply_activation
-from utils.data_io import (
+from app.utils.activations import apply_activation
+from app.utils.data_io import (
     ColumnSelection,
     DataMetadata,
     get_majority_class,
@@ -19,16 +19,16 @@ from utils.data_io import (
     prepare_score_matrix,
     validate_data,
 )
-from utils.exports import (
+from app.utils.exports import (
     generate_timestamp,
     save_classification_report,
     save_confusion_matrix_image,
     save_predictions_csv,
     save_roc_images,
 )
-from utils.metrics import MetricSummary, create_metrics_summary
-from utils.plots import create_inline_roc_display, plot_confusion_matrix_raw
-from utils.thresholds import (
+from app.utils.metrics import MetricSummary, create_metrics_summary
+from app.utils.plots import create_inline_roc_display, plot_confusion_matrix_raw
+from app.utils.thresholds import (
     ThresholdResult,
     compute_optimal_thresholds_youden,
     predict_with_thresholds,
@@ -42,19 +42,13 @@ ACTIVATION_OPTIONS = ["none", "softmax", "sigmoid", "sigmoid_5"]
 
 @st.cache_data(show_spinner=False)
 def parse_uploaded_csv(file_bytes: bytes, delimiter: str | None) -> pd.DataFrame:
-    """
-    Load a CSV file from raw bytes, with optional delimiter override.
-    """
     if not file_bytes:
         raise ValueError("Uploaded file is empty.")
     buffer = io.BytesIO(file_bytes)
-    read_kwargs: dict[str, object] = {}
     if delimiter:
-        read_kwargs["sep"] = delimiter
+        df = pd.read_csv(buffer, sep=delimiter)
     else:
-        read_kwargs["sep"] = None
-        read_kwargs["engine"] = "python"
-    df = pd.read_csv(buffer, **read_kwargs)
+        df = pd.read_csv(buffer, sep=None, engine="python")
     if df.empty:
         raise ValueError("Loaded CSV is empty; please provide a dataset with rows.")
     return df
@@ -113,7 +107,7 @@ def compute_predictions_and_metrics(
         classes=classes,
     )
     optimal = compute_optimal_thresholds_youden(
-        y_true=y_true,
+        y_true=list(y_true),  # Convert ndarray to list/Sequence
         y_scores=result.activated_scores,
         classes=classes,
     )
@@ -380,7 +374,7 @@ def _handle_downloads(
         st.sidebar.success(f"Confusion matrix saved: {path.name}")
 
     if st.sidebar.button("Save ROC figures"):
-        paths = save_roc_images(roc_figures, classes, timestamp=timestamp)
+        paths = save_roc_images(dict(roc_figures), classes, timestamp=timestamp)
         st.sidebar.success(
             f"Saved ROC images ({len(paths)} files) to {paths[next(iter(paths))].parent}"
         )

@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Iterable
+from matplotlib.figure import Figure
+
 
 import pandas as pd
 
@@ -97,13 +99,14 @@ def save_roc_images(
         fig = figures.get(cls)
         if fig is None:
             continue
-        filename = f"{_snake_case(base_prefix)}_{_snake_case(cls)}_{timestamp}.png"
-        path = output_dir / filename
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        saved_paths[cls] = path
+        if isinstance(fig, Figure):  # Proper type guard for matplotlib Figure
+            filename = f"{_snake_case(base_prefix)}_{_snake_case(cls)}_{timestamp}.png"
+            path = output_dir / filename
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            saved_paths[cls] = path
 
     combined_fig = figures.get("combined")
-    if combined_fig is not None:
+    if combined_fig is not None and isinstance(combined_fig, Figure):
         filename = f"{_snake_case(base_prefix)}_combined_{timestamp}.png"
         path = output_dir / filename
         combined_fig.savefig(path, dpi=dpi, bbox_inches="tight")

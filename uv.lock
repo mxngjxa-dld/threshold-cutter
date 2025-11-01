@@ -1045,7 +1045,6 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "plotly" },
-    { name = "pytest" },
     { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "streamlit" },
@@ -1053,6 +1052,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
     { name = "watchdog" },
@@ -1065,7 +1065,6 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "plotly", specifier = ">=6.3.1" },
-    { name = "pytest", specifier = ">=8.4.2" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "streamlit", specifier = ">=1.51.0" },
@@ -1073,6 +1072,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pytest", specifier = ">=8.4.2" },
     { name = "ruff", specifier = ">=0.14.3" },
     { name = "ty", specifier = ">=0.0.1a25" },
     { name = "watchdog", specifier = ">=6.0.0" },

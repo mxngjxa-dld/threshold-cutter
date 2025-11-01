@@ -10,7 +10,6 @@ dependencies = [
     "numpy>=2.3.4",
     "pandas>=2.3.3",
     "plotly>=6.3.1",
-    "pytest>=8.4.2",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
     "streamlit>=1.51.0",
@@ -24,6 +23,7 @@ addopts = "-ra -q"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.4.2",
     "ruff>=0.14.3",
     "ty>=0.0.1a25",
     "watchdog>=6.0.0",

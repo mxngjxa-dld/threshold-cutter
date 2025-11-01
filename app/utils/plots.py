@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure as MplFigure
 import numpy as np
 import seaborn as sns
 from matplotlib.colors import PowerNorm
@@ -79,7 +80,8 @@ def plot_confusion_matrix_raw(
 
     if output_path:
         path = _ensure_output_dir(Path(output_path))
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        if path is not None:  # Type guard
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
 
     return fig
 
@@ -108,22 +110,9 @@ def plot_per_class_roc(
     layout: tuple[int, int] | None = None,
     output_prefix: str | None = None,
     dpi: int = 300,
-) -> dict[str, plt.Figure]:
+) -> dict[str, MplFigure]:  # Specify return type explicitly
     """
     Create individual or multi-panel ROC curves from pre-computed ROC data.
-
-    Parameters
-    ----------
-    roc_data:
-        Mapping of class label -> (fpr array, tpr array).
-    classes:
-        Iterable of class labels, used for ordering.
-    filter_classes:
-        Optional subset of classes to include.
-    layout:
-        Optional (rows, cols) for multi-panel display. If None, auto-calculated.
-    output_prefix:
-        If provided, saves figures into outputs/figures with the prefix.
     """
     class_order = [cls for cls in classes if cls in roc_data]
     if filter_classes is not None:
@@ -133,7 +122,7 @@ def plot_per_class_roc(
     if not class_order:
         raise ValueError("No classes available for ROC plotting with given filter.")
 
-    figures: dict[str, plt.Figure] = {}
+    figures: dict[str, MplFigure] = {}  # Explicitly typed
     needs_save = output_prefix is not None
     output_prefix = output_prefix or "roc"
 
@@ -152,7 +141,8 @@ def plot_per_class_roc(
         multi_fig, multi_axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
         axes_iter = np.ravel(multi_axes)
     else:
-        axes_iter = [plt.subplots(figsize=(6, 5))[1]]
+        _, ax = plt.subplots(figsize=(6, 5))
+        axes_iter = [ax]
 
     for idx, cls in enumerate(class_order):
         fpr, tpr = roc_data[cls]
@@ -166,24 +156,28 @@ def plot_per_class_roc(
         format_roc_figure(ax, f"ROC Curve — {cls}")
 
         fig = ax.get_figure()
-        figures[cls] = fig
+        if fig is not None and isinstance(fig, MplFigure):
+            figures[str(cls)] = fig  # Ensure string key
 
-        if needs_save:
-            filename = (
-                FIGURE_DIR / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
-            )
-            path = _ensure_output_dir(filename)
-            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            if needs_save:
+                filename = (
+                    FIGURE_DIR / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
+                )
+                path = _ensure_output_dir(filename)
+                if path is not None:
+                    fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
 
     if create_multi:
         for idx in range(len(class_order), len(axes_iter)):
             axes_iter[idx].axis("off")
-        multi_fig.tight_layout()
-        if needs_save:
-            filename = FIGURE_DIR / f"{_snake_case(output_prefix)}_combined.png"
-            path = _ensure_output_dir(filename)
-            multi_fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        figures["combined"] = multi_fig
+        if multi_fig is not None and isinstance(multi_fig, MplFigure):
+            multi_fig.tight_layout()
+            if needs_save:
+                filename = FIGURE_DIR / f"{_snake_case(output_prefix)}_combined.png"
+                path = _ensure_output_dir(filename)
+                if path is not None:
+                    multi_fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
+            figures["combined"] = multi_fig
 
     return figures
 

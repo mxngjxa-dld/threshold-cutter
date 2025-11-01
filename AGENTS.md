@@ -14,7 +14,7 @@
 1. Run the full suite before shipping changes:
 
    ```bash
-   uv run pytest -v
+   uv run --dev pytest -v
    ```
 
 2. When modifying column handling:
@@ -29,6 +29,13 @@
 4. If adding new exports or data artefacts:
    - Document them in the README exports section.
   - Provide regression coverage either in existing test modules or create a new targeted test file.
+
+
+5. Type check using `ty`.
+
+```bash
+uv run ty check
+```
 
 ## Known Considerations
 

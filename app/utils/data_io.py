@@ -269,9 +269,9 @@ def validate_data(
 
     wide_columns: Sequence[str] = ()
     if force_format == "wide":
-        wide_columns = column_selection.wide_score_columns or _auto_detect_wide_columns(
-            df, true_label_column
-        )
+        wide_columns = (
+            column_selection.wide_score_columns if column_selection else ()
+        ) or _auto_detect_wide_columns(df, true_label_column)
     elif force_format != "long":
         wide_columns = _auto_detect_wide_columns(df, true_label_column)
 
