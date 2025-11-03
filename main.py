@@ -151,7 +151,7 @@ def get_threshold_bounds(activation: str) -> tuple[float, float, float]:
     activation = (activation or "none").lower()
     if activation in {"sigmoid", "sigmoid_5", "softmax"}:
         return 0.0, 1.0, 0.01
-    return -10.0, 10.0, 0.1
+    return 0.0, 25.0, 0.1
 
 
 def _align_true_labels(

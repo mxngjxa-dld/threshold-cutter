@@ -1,0 +1,4057 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+app/
+  assets/
+    styles.css
+  utils/
+    __init__.py
+    activations.py
+    data_io.py
+    exports.py
+    metrics.py
+    plots.py
+    thresholds.py
+tests/
+  generate_synthetic_data.py
+  test_activations.py
+  test_data_io.py
+  test_metrics.py
+  test_thresholds.py
+.gitignore
+.python-version
+AGENTS.md
+main.py
+pyproject.toml
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".python-version">
+3.13
+</file>
+
+<file path="main.py">
+from __future__ import annotations
+
+import io
+from pathlib import Path
+from typing import Mapping, Sequence
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+from sklearn.metrics import average_precision_score, precision_recall_curve
+
+from app.utils.activations import apply_activation
+from app.utils.data_io import (
+    ColumnSelection,
+    DataMetadata,
+    get_majority_class,
+    infer_column_candidates,
+    prepare_score_matrix,
+    validate_data,
+)
+from app.utils.exports import (
+    generate_timestamp,
+    save_classification_report,
+    save_confusion_matrix_image,
+    save_predictions_csv,
+    save_roc_images,
+)
+from app.utils.metrics import MetricSummary, create_metrics_summary
+from app.utils.plots import create_inline_roc_display, plot_confusion_matrix_raw
+from app.utils.thresholds import (
+    ThresholdResult,
+    compute_optimal_thresholds_youden,
+    predict_with_thresholds,
+)
+
+APP_TITLE = "Multiclass Threshold Tuner"
+ASSETS_DIR = Path(__file__).parent / "app/assets"
+STYLESHEET = ASSETS_DIR / "styles.css"
+ACTIVATION_OPTIONS = ["none", "softmax", "sigmoid", "sigmoid_5"]
+
+
+@st.cache_data(show_spinner=False)
+def parse_uploaded_csv(file_bytes: bytes, delimiter: str | None) -> pd.DataFrame:
+    if not file_bytes:
+        raise ValueError("Uploaded file is empty.")
+    buffer = io.BytesIO(file_bytes)
+    if delimiter:
+        df = pd.read_csv(buffer, sep=delimiter)
+    else:
+        df = pd.read_csv(buffer, sep=None, engine="python")
+    if df.empty:
+        raise ValueError("Loaded CSV is empty; please provide a dataset with rows.")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def prepare_dataset(
+    df: pd.DataFrame,
+    selection: ColumnSelection | None,
+) -> dict[str, object]:
+    """
+    Validate raw dataframe and return core artefacts for downstream processing.
+    """
+    metadata = validate_data(df, column_selection=selection)
+    scores, index = prepare_score_matrix(
+        df,
+        metadata.classes,
+        metadata,
+        return_index=True,
+    )
+    y_true = _align_true_labels(df, metadata, index)
+    fallback_class = get_majority_class(y_true)
+    return {
+        "metadata": metadata,
+        "scores": scores,
+        "index": index,
+        "y_true": y_true,
+        "fallback_class": fallback_class,
+    }
+
+
+@st.cache_data(show_spinner=False)
+def compute_predictions_and_metrics(
+    scores: np.ndarray,
+    y_true: np.ndarray,
+    classes: tuple[str, ...],
+    activation: str,
+    thresholds_signature: tuple[tuple[str, float], ...],
+    fallback_class: str,
+) -> dict[str, object]:
+    """
+    Execute activation, thresholding, and metrics computation under caching.
+    """
+    thresholds_map = {cls: float(val) for cls, val in thresholds_signature}
+    result = predict_with_thresholds(
+        scores,
+        classes,
+        thresholds=thresholds_map,
+        activation=activation,
+        fallback_class=fallback_class,
+    )
+    summary = create_metrics_summary(
+        y_true=y_true,
+        y_pred=result.predictions,
+        y_scores=result.activated_scores,
+        classes=classes,
+    )
+    optimal = compute_optimal_thresholds_youden(
+        y_true=list(y_true),  # Convert ndarray to list/Sequence
+        y_scores=result.activated_scores,
+        classes=classes,
+    )
+    return {
+        "result": result,
+        "summary": summary,
+        "optimal_thresholds": optimal,
+    }
+
+
+def inject_css(path: Path) -> None:
+    if path.exists():
+        css = path.read_text(encoding="utf-8")
+        st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+def ensure_session_defaults() -> None:
+    defaults = {
+        "global_threshold": 0.5,
+        "auto_global": False,
+        "auto_per_class": False,
+        "class_thresholds": {},
+        "class_filter": [],
+        "activation_prev": None,
+        "dataset_signature": None,
+        "fallback_class": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def get_default_threshold(activation: str) -> float:
+    activation = (activation or "none").lower()
+    if activation in {"sigmoid", "sigmoid_5", "softmax"}:
+        return 0.5
+    return 0.0
+
+
+def get_threshold_bounds(activation: str) -> tuple[float, float, float]:
+    activation = (activation or "none").lower()
+    if activation in {"sigmoid", "sigmoid_5", "softmax"}:
+        return 0.0, 1.0, 0.01
+    return 0.0, 25.0, 0.1
+
+
+def _align_true_labels(
+    df: pd.DataFrame,
+    metadata: DataMetadata,
+    index: pd.Index,
+) -> np.ndarray:
+    label_column = metadata.true_label_column
+    if label_column not in df.columns:
+        raise KeyError(
+            f"True label column '{label_column}' not found in uploaded data."
+        )
+
+    if metadata.format == "wide":
+        aligned = df.loc[index, label_column]
+        return aligned.to_numpy()
+
+    id_col = metadata.sample_id_column
+    if id_col and id_col in df.columns:
+        label_series = (
+            df[[id_col, label_column]]
+            .drop_duplicates(subset=id_col, keep="first")
+            .set_index(id_col)[label_column]
+        )
+        aligned = label_series.reindex(index)
+        return aligned.to_numpy()
+
+    series = df[label_column].reset_index(drop=True)
+    if len(series) == len(index):
+        return series.to_numpy()
+
+    try:
+        positions = index.astype(int)
+        return series.iloc[positions].to_numpy()
+    except (TypeError, ValueError, AttributeError):
+        return series.to_numpy()
+
+
+def _build_threshold_signature(
+    class_thresholds: Mapping[str, float],
+    classes: Sequence[str],
+) -> tuple[tuple[str, float], ...]:
+    return tuple((cls, float(class_thresholds[cls])) for cls in classes)
+
+
+def _compute_auto_threshold_map(
+    optimal_df: pd.DataFrame,
+    classes: Sequence[str],
+    default_value: float,
+) -> dict[str, float]:
+    auto_map: dict[str, float] = {}
+    for cls in classes:
+        value = (
+            float(optimal_df.loc[cls, "optimal_threshold"])
+            if cls in optimal_df.index
+            else float("nan")
+        )
+        if not np.isfinite(value):
+            value = default_value
+        auto_map[cls] = value
+    return auto_map
+
+
+def _build_prediction_dataframe(
+    sample_index: pd.Index,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    activated_scores: np.ndarray,
+    classes: Sequence[str],
+    activation: str,
+    class_thresholds: Mapping[str, float],
+    global_threshold: float,
+    fallback_class: str,
+) -> pd.DataFrame:
+    df = pd.DataFrame(
+        {
+            "sample_key": sample_index,
+            "true_label": y_true,
+            "predicted_class": y_pred,
+        }
+    )
+    for idx, cls in enumerate(classes):
+        df[f"score_{cls}"] = activated_scores[:, idx]
+    for cls, value in class_thresholds.items():
+        df[f"threshold_{cls}"] = value
+    df["global_threshold"] = float(global_threshold)
+    df["activation"] = activation
+    df["fallback_class"] = fallback_class
+    return df
+
+
+def _render_metric_cards(summary: MetricSummary) -> None:
+    st.markdown(
+        """
+<div class="main-card metric-row">
+  <div class="metric-card">
+    <h3>Accuracy</h3>
+    <div class="value">{accuracy:.4f}</div>
+  </div>
+  <div class="metric-card">
+    <h3>Macro Precision</h3>
+    <div class="value">{precision:.4f}</div>
+  </div>
+  <div class="metric-card">
+    <h3>Macro Recall</h3>
+    <div class="value">{recall:.4f}</div>
+  </div>
+  <div class="metric-card">
+    <h3>Macro F1</h3>
+    <div class="value">{f1:.4f}</div>
+  </div>
+</div>
+""".format(
+            accuracy=summary.accuracy,
+            precision=summary.macro_precision,
+            recall=summary.macro_recall,
+            f1=summary.macro_f1,
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_youden_table(
+    summary: MetricSummary,
+    selected_classes: Sequence[str],
+) -> None:
+    display_df = summary.per_class.loc[
+        selected_classes, ["optimal_threshold", "youden_j", "tpr", "fpr", "auc"]
+    ]
+    display_df = display_df.rename(
+        columns={
+            "optimal_threshold": "optimal_threshold",
+            "youden_j": "youden_j",
+            "tpr": "tpr",
+            "fpr": "fpr",
+            "auc": "auc",
+        }
+    )
+    display_df = display_df.reset_index().rename(columns={"index": "class"})
+    st.markdown(
+        display_df.to_html(
+            index=False,
+            classes="youden-table",
+            float_format=lambda x: f"{x:.4f}" if pd.notna(x) else "NaN",
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _build_pr_curve_figure(
+    y_true: np.ndarray,
+    y_scores: np.ndarray,
+    classes: Sequence[str],
+    filter_classes: Sequence[str],
+) -> plt.Figure | None:
+    chosen = [cls for cls in classes if cls in filter_classes]
+    if not chosen:
+        return None
+
+    has_curve = False
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for cls in chosen:
+        idx = classes.index(cls)
+        binary_true = (y_true == cls).astype(int)
+        if binary_true.sum() == 0:
+            continue
+        precision, recall, _ = precision_recall_curve(binary_true, y_scores[:, idx])
+        ap = average_precision_score(binary_true, y_scores[:, idx])
+        ax.step(recall, precision, where="post", label=f"{cls} (AP={ap:.3f})")
+        has_curve = True
+
+    if not has_curve:
+        plt.close(fig)
+        return None
+
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall Curves")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="lower left")
+    fig.tight_layout()
+    return fig
+
+
+def _handle_downloads(
+    summary: MetricSummary,
+    optimal_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    thresholds_map: Mapping[str, float],
+    classes: Sequence[str],
+    confusion_fig,
+    roc_figures: Mapping[str, plt.Figure],
+) -> None:
+    st.sidebar.markdown("### Downloads")
+    timestamp = generate_timestamp()
+
+    if st.sidebar.button("Save metrics summary"):
+        overall = {
+            "accuracy": summary.accuracy,
+            "macro_precision": summary.macro_precision,
+            "macro_recall": summary.macro_recall,
+            "macro_f1": summary.macro_f1,
+            "micro_auc": summary.micro_auc,
+            "macro_auc": summary.macro_auc,
+        }
+        per_class = summary.per_class.reset_index().to_dict(orient="records")
+        youden = optimal_df.reset_index().to_dict(orient="records")
+        report = {
+            "overall": overall,
+            "per_class": per_class,
+            "youden": youden,
+        }
+        paths = save_classification_report(report, timestamp=timestamp)
+        st.sidebar.success(f"Metrics saved: {paths['json'].name}, {paths['csv'].name}")
+
+    if st.sidebar.button("Save confusion matrix image"):
+        path = save_confusion_matrix_image(confusion_fig, timestamp=timestamp)
+        st.sidebar.success(f"Confusion matrix saved: {path.name}")
+
+    if st.sidebar.button("Save ROC figures"):
+        paths = save_roc_images(dict(roc_figures), classes, timestamp=timestamp)
+        st.sidebar.success(
+            f"Saved ROC images ({len(paths)} files) to {paths[next(iter(paths))].parent}"
+        )
+
+    if st.sidebar.button("Save predictions CSV"):
+        path = save_predictions_csv(
+            predictions_df,
+            thresholds=dict(thresholds_map),
+            timestamp=timestamp,
+        )
+        st.sidebar.success(f"Predictions saved: {path.name}")
+
+
+def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    inject_css(STYLESHEET)
+    ensure_session_defaults()
+
+    st.title(APP_TITLE)
+    st.caption(
+        "Interactive Streamlit application for multiclass threshold tuning and evaluation."
+    )
+
+    with st.sidebar:
+        st.header("Dataset")
+        uploaded_file = st.file_uploader(
+            "Upload classification data (CSV)",
+            type=["csv"],
+            accept_multiple_files=False,
+        )
+        delimiter_input = st.text_input(
+            "Delimiter override",
+            help="Leave blank for auto-detection.",
+        )
+        delimiter = delimiter_input or None
+        st.divider()
+        st.header("Activation")
+        default_activation = st.session_state["activation_prev"] or "none"
+        activation = st.selectbox(
+            "Activation function",
+            options=ACTIVATION_OPTIONS,
+            index=ACTIVATION_OPTIONS.index(default_activation),
+        )
+        st.session_state["activation_prev"] = activation
+
+    if uploaded_file is None:
+        st.info("Upload a CSV file to begin threshold tuning.")
+        return
+
+    try:
+        df = parse_uploaded_csv(uploaded_file.getvalue(), delimiter)
+    except Exception as exc:
+        st.error(f"Failed to read CSV: {exc}")
+        return
+
+    dataset_signature = (tuple(df.columns), len(df))
+    if st.session_state["dataset_signature"] != dataset_signature:
+        st.session_state["dataset_signature"] = dataset_signature
+        st.session_state["class_thresholds"] = {}
+        st.session_state["class_filter"] = []
+        st.session_state["fallback_class"] = None
+        st.session_state.pop("column_mapping_signature", None)
+        for key in list(st.session_state.keys()):
+            if key.startswith("threshold_") or key.startswith("column_mapping_"):
+                del st.session_state[key]
+
+    try:
+        column_candidates = infer_column_candidates(df)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to infer column mappings: {exc}")
+        return
+
+    format_options = ["wide", "long"]
+    stored_format = st.session_state.get(
+        "column_mapping_format", column_candidates.default_format
+    )
+    if stored_format not in format_options:
+        stored_format = column_candidates.default_format
+
+    true_label_options = list(column_candidates.true_label_options)
+    if not true_label_options:
+        true_label_options = list(df.columns)
+
+    with st.sidebar:
+        st.header("Column Mapping")
+        format_choice = st.radio(
+            "Data layout",
+            options=format_options,
+            index=format_options.index(stored_format),
+            key="column_mapping_format",
+            help="Select whether the uploaded data is organised in wide or long format.",
+        )
+
+        true_label_default = st.session_state.get(
+            "column_mapping_true_label", column_candidates.true_label_default
+        )
+        if true_label_default not in true_label_options:
+            true_label_default = true_label_options[0]
+        true_label_index = true_label_options.index(true_label_default)
+        true_label_column = st.selectbox(
+            "True label column",
+            options=true_label_options,
+            index=true_label_index,
+            key="column_mapping_true_label",
+            help="Column containing ground-truth labels.",
+        )
+
+        remaining_columns = [col for col in df.columns if col != true_label_column]
+
+        sample_id_default = st.session_state.get(
+            "column_mapping_sample_id",
+            column_candidates.sample_id_default or "<None>",
+        )
+        sample_id_options = ["<None>"] + remaining_columns
+        if sample_id_default not in sample_id_options:
+            sample_id_default = "<None>"
+        sample_id_index = sample_id_options.index(sample_id_default)
+        sample_id_choice = st.selectbox(
+            "Sample identifier column",
+            options=sample_id_options,
+            index=sample_id_index,
+            key="column_mapping_sample_id",
+            help="Optional column used to align long-format rows belonging to the same sample.",
+        )
+        sample_id_column = None if sample_id_choice == "<None>" else sample_id_choice
+
+        long_class_column: str | None = None
+        long_score_column: str | None = None
+        wide_columns: list[str] = []
+
+        if format_choice == "wide":
+            preferred_wide = [
+                col
+                for col in column_candidates.wide_score_options
+                if col in remaining_columns
+            ]
+            fallback_wide = [
+                col for col in remaining_columns if col not in preferred_wide
+            ]
+            wide_options = preferred_wide + fallback_wide
+            if "column_mapping_wide_scores" in st.session_state:
+                current_wide = [
+                    col
+                    for col in st.session_state["column_mapping_wide_scores"]
+                    if col in wide_options
+                ]
+            else:
+                current_wide = list(column_candidates.wide_score_default)
+            wide_columns = st.multiselect(
+                "Score columns",
+                options=wide_options,
+                default=current_wide,
+                key="column_mapping_wide_scores",
+                help="Numeric score columns used to build the per-class score matrix.",
+            )
+            if len(wide_columns) < 2:
+                st.info("Select at least two score columns for wide-format datasets.")
+        else:
+            preferred_class = [
+                col
+                for col in column_candidates.long_class_options
+                if col in remaining_columns
+            ]
+            fallback_class = [
+                col for col in remaining_columns if col not in preferred_class
+            ]
+            long_class_options = preferred_class + fallback_class
+            if not long_class_options:
+                long_class_options = remaining_columns
+            if (
+                "column_mapping_long_class" in st.session_state
+                and st.session_state["column_mapping_long_class"]
+                not in long_class_options
+            ):
+                del st.session_state["column_mapping_long_class"]
+            long_class_default = st.session_state.get(
+                "column_mapping_long_class",
+                column_candidates.long_class_default
+                or (long_class_options[0] if long_class_options else None),
+            )
+            if long_class_default not in long_class_options and long_class_options:
+                long_class_default = long_class_options[0]
+            long_class_index = (
+                long_class_options.index(long_class_default)
+                if long_class_default in long_class_options
+                else 0
+            )
+            long_class_column = st.selectbox(
+                "Predicted class column",
+                options=long_class_options,
+                index=long_class_index,
+                key="column_mapping_long_class",
+                help="Column providing the predicted class per row.",
+            )
+
+            score_candidates = [
+                col
+                for col in column_candidates.long_score_options
+                if col in remaining_columns
+            ]
+            fallback_score = [
+                col for col in remaining_columns if col not in score_candidates
+            ]
+            long_score_options = [
+                col
+                for col in score_candidates + fallback_score
+                if col != long_class_column
+            ]
+            if not long_score_options:
+                long_score_options = [
+                    col for col in remaining_columns if col != long_class_column
+                ]
+            if not long_score_options:
+                st.error(
+                    "Unable to determine a score column; please add a numeric score column to the dataset."
+                )
+                return
+            if (
+                "column_mapping_long_score" in st.session_state
+                and st.session_state["column_mapping_long_score"]
+                not in long_score_options
+            ):
+                del st.session_state["column_mapping_long_score"]
+            long_score_default = st.session_state.get(
+                "column_mapping_long_score",
+                column_candidates.long_score_default or long_score_options[0],
+            )
+            if long_score_default not in long_score_options:
+                long_score_default = long_score_options[0]
+            long_score_index = long_score_options.index(long_score_default)
+            long_score_column = st.selectbox(
+                "Score column",
+                options=long_score_options,
+                index=long_score_index,
+                key="column_mapping_long_score",
+                help="Numeric score for the predicted class.",
+            )
+
+    column_selection = ColumnSelection(
+        format=format_choice,
+        true_label=true_label_column,
+        wide_score_columns=tuple(wide_columns) if format_choice == "wide" else (),
+        long_class_column=long_class_column if format_choice == "long" else None,
+        long_score_column=long_score_column if format_choice == "long" else None,
+        sample_id_column=sample_id_column,
+    )
+
+    mapping_signature = (
+        column_selection.format,
+        column_selection.true_label,
+        column_selection.sample_id_column,
+        column_selection.long_class_column,
+        column_selection.long_score_column,
+        column_selection.wide_score_columns,
+    )
+    if st.session_state.get("column_mapping_signature") != mapping_signature:
+        st.session_state["column_mapping_signature"] = mapping_signature
+        st.session_state["class_thresholds"] = {}
+        st.session_state["class_filter"] = []
+        st.session_state["fallback_class"] = None
+        for key in list(st.session_state.keys()):
+            if key.startswith("threshold_"):
+                del st.session_state[key]
+
+    with st.spinner("Preparing dataset..."):
+        try:
+            data_bundle = prepare_dataset(df, column_selection)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Data validation failed: {exc}")
+            return
+
+    metadata: DataMetadata = data_bundle["metadata"]  # type: ignore[assignment]
+    classes = list(metadata.classes)
+    scores: np.ndarray = data_bundle["scores"]  # type: ignore[assignment]
+    y_true: np.ndarray = data_bundle["y_true"]  # type: ignore[assignment]
+    sample_index: pd.Index = data_bundle["index"]  # type: ignore[assignment]
+    fallback_default = data_bundle["fallback_class"]  # type: ignore[assignment]
+
+    default_threshold = get_default_threshold(activation)
+    st.session_state.setdefault("global_threshold", default_threshold)
+
+    if st.session_state["fallback_class"] not in classes:
+        st.session_state["fallback_class"] = (
+            fallback_default if fallback_default in classes else classes[0]
+        )
+
+    class_thresholds_state: dict[str, float] = st.session_state["class_thresholds"]
+    for cls in classes:
+        class_thresholds_state.setdefault(cls, default_threshold)
+    for cls in list(class_thresholds_state.keys()):
+        if cls not in classes:
+            class_thresholds_state.pop(cls, None)
+
+    with st.sidebar:
+        st.header("Thresholds")
+        auto_global = st.checkbox(
+            "Auto global threshold",
+            key="auto_global",
+            help="Derive a single threshold from Youden's J averages.",
+        )
+        auto_per_class = st.checkbox(
+            "Auto per-class thresholds",
+            key="auto_per_class",
+            help="Use class-wise Youden-optimal thresholds.",
+        )
+        min_thr, max_thr, step_thr = get_threshold_bounds(activation)
+        if (
+            "class_filter" not in st.session_state
+            or not st.session_state["class_filter"]
+        ):
+            st.session_state["class_filter"] = list(classes)
+
+        st.header("Fallback & Filtering")
+        fallback_idx = classes.index(st.session_state["fallback_class"])
+        fallback_class = st.selectbox(
+            "Fallback class",
+            options=classes,
+            index=fallback_idx,
+            key="fallback_class",
+            help="Class assigned when no thresholds are exceeded.",
+        )
+
+    activated_scores = apply_activation(scores, activation)
+    optimal_thresholds_df = compute_optimal_thresholds_youden(
+        y_true,
+        activated_scores,
+        classes,
+    )
+    auto_threshold_map = _compute_auto_threshold_map(
+        optimal_thresholds_df,
+        classes,
+        default_threshold,
+    )
+    finite_values = [v for v in auto_threshold_map.values() if np.isfinite(v)]
+    auto_global_value = (
+        float(np.mean(finite_values)) if finite_values else default_threshold
+    )
+
+    if auto_global:
+        st.session_state["global_threshold"] = auto_global_value
+    if (
+        st.session_state["global_threshold"] < min_thr
+        or st.session_state["global_threshold"] > max_thr
+    ):
+        st.session_state["global_threshold"] = float(
+            np.clip(st.session_state["global_threshold"], min_thr, max_thr)
+        )
+
+    with st.sidebar:
+        global_threshold = st.slider(
+            "Global threshold",
+            min_value=float(min_thr),
+            max_value=float(max_thr),
+            value=float(st.session_state["global_threshold"]),
+            step=float(step_thr),
+            key="global_threshold",
+            disabled=auto_global,
+        )
+
+        st.markdown("#### Per-class thresholds")
+        per_class_thresholds: dict[str, float] = {}
+        for cls in classes:
+            key = f"threshold_{cls}"
+            if auto_per_class:
+                value = auto_threshold_map.get(cls, global_threshold)
+                st.session_state[key] = value
+            else:
+                st.session_state.setdefault(
+                    key, class_thresholds_state.get(cls, global_threshold)
+                )
+            slider_value = st.slider(
+                f"{cls}",
+                min_value=float(min_thr),
+                max_value=float(max_thr),
+                value=float(st.session_state[key]),
+                step=float(step_thr),
+                key=key,
+                disabled=auto_per_class,
+            )
+            class_thresholds_state[cls] = float(slider_value)
+            per_class_thresholds[cls] = float(slider_value)
+
+        st.markdown("#### Class filter")
+        if any(cls not in classes for cls in st.session_state["class_filter"]):
+            st.session_state["class_filter"] = list(classes)
+        selected_classes = st.multiselect(
+            "Classes to visualize",
+            options=classes,
+            key="class_filter",
+        )
+        if not selected_classes:
+            selected_classes = classes
+
+    thresholds_signature = _build_threshold_signature(per_class_thresholds, classes)
+
+    computation = compute_predictions_and_metrics(
+        scores=scores,
+        y_true=y_true,
+        classes=tuple(classes),
+        activation=activation,
+        thresholds_signature=thresholds_signature,
+        fallback_class=st.session_state["fallback_class"],
+    )
+    result: ThresholdResult = computation["result"]  # type: ignore[assignment]
+    summary: MetricSummary = computation["summary"]  # type: ignore[assignment]
+    optimal_thresholds_df = computation["optimal_thresholds"]  # type: ignore[assignment]
+
+    predictions_df = _build_prediction_dataframe(
+        sample_index=sample_index,
+        y_true=y_true,
+        y_pred=result.predictions,
+        activated_scores=result.activated_scores,
+        classes=classes,
+        activation=activation,
+        class_thresholds=per_class_thresholds,
+        global_threshold=st.session_state["global_threshold"],
+        fallback_class=st.session_state["fallback_class"],
+    )
+
+    st.subheader("Evaluation Overview")
+    _render_metric_cards(summary)
+
+    micro_auc_text = (
+        f"{summary.micro_auc:.4f}" if summary.micro_auc is not None else "N/A"
+    )
+    macro_auc_text = (
+        f"{summary.macro_auc:.4f}" if summary.macro_auc is not None else "N/A"
+    )
+    st.markdown(
+        f"**Micro AUC:** {micro_auc_text} &nbsp;&nbsp;·&nbsp;&nbsp; **Macro AUC:** {macro_auc_text}"
+    )
+
+    filter_mask = np.isin(y_true, selected_classes)
+    filtered_true = y_true[filter_mask]
+    filtered_pred = result.predictions[filter_mask]
+    confusion_fig = plot_confusion_matrix_raw(
+        filtered_true,
+        filtered_pred,
+        classes=selected_classes,
+        f1_macro=summary.macro_f1,
+    )
+    st.markdown("### Confusion Matrix")
+    st.pyplot(confusion_fig, width="stretch")
+    plt.close(confusion_fig)
+
+    st.markdown("### ROC Curves")
+    roc_figures = create_inline_roc_display(
+        roc_df=summary.per_class,
+        classes=classes,
+        filter_classes=selected_classes,
+    )
+    if "combined" in roc_figures:
+        st.pyplot(roc_figures["combined"], width="stretch")
+    for cls, fig in roc_figures.items():
+        if cls == "combined":
+            continue
+        st.pyplot(fig, width="content")
+    for fig in roc_figures.values():
+        plt.close(fig)
+
+    st.markdown("### Youden's J Statistics")
+    _render_youden_table(summary, selected_classes)
+
+    st.markdown("### Precision-Recall Curves")
+    pr_fig = _build_pr_curve_figure(
+        y_true=y_true,
+        y_scores=result.activated_scores,
+        classes=classes,
+        filter_classes=selected_classes,
+    )
+    if pr_fig is not None:
+        st.pyplot(pr_fig, width="stretch")
+        plt.close(pr_fig)
+    else:
+        st.info(
+            "Precision-Recall curves unavailable: no positive support for selected classes."
+        )
+
+    _handle_downloads(
+        summary=summary,
+        optimal_df=optimal_thresholds_df,
+        predictions_df=predictions_df,
+        thresholds_map=per_class_thresholds,
+        classes=classes,
+        confusion_fig=confusion_fig,
+        roc_figures=roc_figures,
+    )
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="app/utils/metrics.py">
+"""
+Metric computation helpers for the multiclass threshold tuner.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    precision_recall_fscore_support,
+    roc_auc_score,
+    roc_curve,
+)
+
+ArrayLike = Iterable
+
+
+@dataclass(frozen=True)
+class MetricSummary:
+    accuracy: float
+    macro_precision: float
+    macro_recall: float
+    macro_f1: float
+    per_class: pd.DataFrame
+    micro_auc: float | None
+    macro_auc: float | None
+    youden_by_class: pd.DataFrame
+
+
+def _as_numpy_labels(values: ArrayLike) -> np.ndarray:
+    array = np.asarray(list(values))
+    if array.size == 0:
+        raise ValueError("Metric computations require non-empty label arrays.")
+    return array
+
+
+def compute_classification_metrics(
+    y_true: ArrayLike,
+    y_pred: ArrayLike,
+) -> dict[str, float]:
+    """
+    Return a dictionary of aggregate classification metrics.
+    """
+    y_true_arr = _as_numpy_labels(y_true)
+    y_pred_arr = _as_numpy_labels(y_pred)
+
+    labels = np.unique(np.concatenate([y_true_arr, y_pred_arr]))
+    accuracy = float(accuracy_score(y_true_arr, y_pred_arr))
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true_arr,
+        y_pred_arr,
+        labels=labels,
+        average=None,
+        zero_division=0.0,
+    )
+    macro_precision = float(np.nanmean(precision))
+    macro_recall = float(np.nanmean(recall))
+    macro_f1 = float(np.nanmean(f1))
+
+    return {
+        "accuracy": accuracy,
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+        "macro_f1": macro_f1,
+    }
+
+
+def per_class_roc_and_j(
+    y_true: ArrayLike,
+    y_scores: np.ndarray,
+    classes: Iterable[str],
+) -> pd.DataFrame:
+    """
+    Compute ROC curve data, AUC, and Youden's J statistic per class.
+    """
+    y_true_arr = _as_numpy_labels(y_true)
+    scores = np.asarray(y_scores, dtype=np.float64)
+    class_labels = list(classes)
+
+    if scores.ndim != 2:
+        raise ValueError("y_scores must be a 2D array of shape (n_samples, n_classes).")
+    if scores.shape[0] != len(y_true_arr):
+        raise ValueError("Number of score rows must match number of labels.")
+    if scores.shape[1] != len(class_labels):
+        raise ValueError(
+            "Number of score columns must match the length of the classes iterable."
+        )
+
+    records = []
+    for idx, cls in enumerate(class_labels):
+        binary_true = (y_true_arr == cls).astype(int)
+
+        positives = int(binary_true.sum())
+        negatives = len(binary_true) - positives
+        if positives == 0 or negatives == 0:
+            records.append(
+                {
+                    "class": cls,
+                    "auc": np.nan,
+                    "youden_j": np.nan,
+                    "optimal_threshold": np.nan,
+                    "tpr": 0.0,
+                    "fpr": 1.0 if positives == 0 else 0.0,
+                    "roc_curve": (np.array([0.0, 1.0]), np.array([0.0, 1.0])),
+                    "support_pos": positives,
+                    "support_neg": negatives,
+                }
+            )
+            continue
+
+        if positives == 1 or negatives == 1:
+            records.append(
+                {
+                    "class": cls,
+                    "auc": np.nan,
+                    "youden_j": np.nan,
+                    "optimal_threshold": np.nan,
+                    "tpr": np.nan,
+                    "fpr": np.nan,
+                    "roc_curve": (np.array([0.0, 1.0]), np.array([0.0, 1.0])),
+                    "support_pos": positives,
+                    "support_neg": negatives,
+                }
+            )
+            continue
+
+        fpr, tpr, thresholds = roc_curve(binary_true, scores[:, idx])
+        youden = tpr - fpr
+        best_idx = np.nanargmax(youden)
+
+        class_auc = float(
+            auc(fpr, tpr)
+            if np.isfinite(fpr).all() and np.isfinite(tpr).all()
+            else np.nan
+        )
+
+        records.append(
+            {
+                "class": cls,
+                "auc": class_auc,
+                "youden_j": float(youden[best_idx]),
+                "optimal_threshold": float(thresholds[best_idx]),
+                "tpr": float(tpr[best_idx]),
+                "fpr": float(fpr[best_idx]),
+                "roc_curve": (fpr, tpr),
+                "support_pos": int(positives),
+                "support_neg": int(negatives),
+            }
+        )
+
+    df = pd.DataFrame(records).set_index("class")
+    return df
+
+
+def compute_micro_macro_auc(
+    y_true: ArrayLike,
+    y_scores: np.ndarray,
+    classes: Iterable[str],
+) -> tuple[float | None, float | None]:
+    """
+    Compute micro and macro averaged AUC scores.
+    """
+    y_true_arr = _as_numpy_labels(y_true)
+    scores = np.asarray(y_scores, dtype=np.float64)
+    class_labels = list(classes)
+
+    if scores.shape[0] != len(y_true_arr):
+        raise ValueError("y_scores rows must equal number of labels.")
+    if scores.shape[1] != len(class_labels):
+        raise ValueError("y_scores columns must match class count.")
+
+    # convert to one-hot for ROC AUC; gracefully handle missing classes
+    one_hot = pd.get_dummies(y_true_arr, drop_first=False).reindex(
+        columns=class_labels, fill_value=0
+    )
+    if one_hot.values.ndim != 2:
+        raise ValueError("Failed to construct one-hot encoded labels.")
+
+    try:
+        micro_auc = float(
+            roc_auc_score(one_hot.values, scores, average="micro", multi_class="ovr")
+        )
+    except ValueError:
+        micro_auc = None
+
+    try:
+        macro_auc = float(
+            roc_auc_score(one_hot.values, scores, average="macro", multi_class="ovr")
+        )
+    except ValueError:
+        macro_auc = None
+
+    return micro_auc, macro_auc
+
+
+def create_metrics_summary(
+    y_true: ArrayLike,
+    y_pred: ArrayLike,
+    y_scores: np.ndarray,
+    classes: Iterable[str],
+) -> MetricSummary:
+    """
+    Aggregate metrics into a structured summary object.
+    """
+    agg_metrics = compute_classification_metrics(y_true, y_pred)
+    per_class_df = per_class_roc_and_j(y_true, y_scores, classes)
+    micro_auc, macro_auc = compute_micro_macro_auc(y_true, y_scores, classes)
+
+    summary_df = per_class_df.copy()
+    summary_df["support_total"] = summary_df["support_pos"] + summary_df["support_neg"]
+    summary_df["auc"] = summary_df["auc"].astype(float)
+
+    return MetricSummary(
+        accuracy=agg_metrics["accuracy"],
+        macro_precision=agg_metrics["macro_precision"],
+        macro_recall=agg_metrics["macro_recall"],
+        macro_f1=agg_metrics["macro_f1"],
+        per_class=summary_df,
+        micro_auc=micro_auc,
+        macro_auc=macro_auc,
+        youden_by_class=per_class_df[["youden_j", "optimal_threshold", "tpr", "fpr"]],
+    )
+
+
+__all__ = [
+    "MetricSummary",
+    "compute_classification_metrics",
+    "per_class_roc_and_j",
+    "compute_micro_macro_auc",
+    "create_metrics_summary",
+]
+</file>
+
+<file path="tests/generate_synthetic_data.py">
+"""
+Synthetic data generator for the multiclass threshold tuner project.
+
+Produces both "wide" (single row per sample with logit columns) and "long"
+(one row per sample-class pair) CSV files with configurable dataset size,
+class count, and optional edge-case injections targeted at exercising the UI.
+Edge cases include heavy class imbalance, scores near decision thresholds,
+missing values, label noise, extreme logits, and duplicated samples.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+
+LOGIT_PREFIX = "logit_"
+
+
+@dataclass(frozen=True)
+class SyntheticDataset:
+    wide: pd.DataFrame
+    long: pd.DataFrame
+    classes: tuple[str, ...]
+    parameters: dict[str, int | float | str | None] | None = None
+
+
+def _build_class_labels(num_classes: int) -> tuple[str, ...]:
+    if num_classes < 2:
+        raise ValueError("num_classes must be >= 2 to form a multiclass problem.")
+    return tuple(f"class_{idx:02d}" for idx in range(num_classes))
+
+
+def _build_class_weights(
+    num_classes: int,
+    imbalance_factor: float = 0.65,
+) -> np.ndarray:
+    imbalance_factor = float(imbalance_factor)
+    if not (0.0 < imbalance_factor <= 1.0):
+        raise ValueError("imbalance_factor must lie within (0, 1].")
+    if np.isclose(imbalance_factor, 1.0):
+        return np.full(num_classes, 1.0 / num_classes, dtype=np.float64)
+    weights = imbalance_factor ** np.arange(num_classes, dtype=np.float64)
+    weights /= weights.sum()
+    return weights
+
+
+def _validate_ratio(name: str, value: float, *, max_value: float = 1.0) -> float:
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be a finite value.")
+    if value < 0.0 or value > max_value:
+        raise ValueError(f"{name} must be within [0, {max_value}].")
+    return value
+
+
+def _generate_logits_internal(
+    num_samples: int,
+    num_classes: int,
+    rng: np.random.Generator,
+    imbalance_factor: float,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    if num_samples <= 0:
+        raise ValueError("num_samples must be a positive integer.")
+    classes = _build_class_labels(num_classes)
+    weights = _build_class_weights(num_classes, imbalance_factor)
+    logits = rng.normal(loc=0.0, scale=3.0, size=(num_samples, len(classes)))
+    y_true = rng.choice(classes, size=num_samples, p=weights)
+    return logits.astype(np.float64), np.asarray(y_true, dtype=object), classes
+
+
+def generate_synthetic_logits(
+    num_samples: int,
+    num_classes: int,
+    seed: int | None = 42,
+    imbalance_factor: float = 0.65,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    rng = np.random.default_rng(seed)
+    return _generate_logits_internal(num_samples, num_classes, rng, imbalance_factor)
+
+
+def _inject_near_threshold(
+    logits: np.ndarray,
+    rng: np.random.Generator,
+    proportion: float,
+    jitter_scale: float = 0.25,
+) -> None:
+    if proportion <= 0.0 or logits.size == 0:
+        return
+    num_rows = logits.shape[0]
+    count = max(1, int(round(num_rows * proportion)))
+    count = min(count, num_rows)
+    indices = rng.choice(num_rows, size=count, replace=False)
+    jitter = rng.normal(loc=0.0, scale=jitter_scale, size=(count, logits.shape[1]))
+    logits[indices] = jitter
+
+
+def _inject_extreme_scores(
+    logits: np.ndarray,
+    rng: np.random.Generator,
+    proportion: float,
+    scale: float,
+) -> None:
+    if proportion <= 0.0 or logits.size == 0:
+        return
+    if scale <= 0.0:
+        raise ValueError("extreme_score_scale must be positive.")
+    total = logits.size
+    count = max(1, int(round(total * proportion)))
+    count = min(count, total)
+    flat_indices = rng.choice(total, size=count, replace=False)
+    rows, cols = np.unravel_index(flat_indices, logits.shape)
+    signs = rng.choice([-1.0, 1.0], size=count)
+    magnitudes = rng.uniform(low=scale * 0.75, high=scale, size=count)
+    logits[rows, cols] = signs * magnitudes
+
+
+def _apply_label_noise(
+    y_true: np.ndarray,
+    classes: Iterable[str],
+    noise_rate: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if noise_rate <= 0.0 or y_true.size == 0:
+        return y_true
+    classes_array = np.asarray(tuple(classes), dtype=object)
+    if classes_array.size <= 1:
+        return y_true
+    num_samples = y_true.size
+    count = max(1, int(round(num_samples * noise_rate)))
+    count = min(count, num_samples)
+    indices = rng.choice(num_samples, size=count, replace=False)
+    mutated = y_true.copy()
+    for idx in indices:
+        current = mutated[idx]
+        candidates = classes_array[classes_array != current]
+        if candidates.size == 0:
+            continue
+        mutated[idx] = rng.choice(candidates)
+    return mutated
+
+
+def _build_wide_dataframe(
+    logits: np.ndarray,
+    y_true: np.ndarray,
+    classes: Iterable[str],
+) -> pd.DataFrame:
+    class_list = list(classes)
+    score_columns = [f"{LOGIT_PREFIX}{cls}" for cls in class_list]
+    scores_df = pd.DataFrame(logits, columns=score_columns)
+    wide_df = pd.DataFrame({"true_label": pd.Series(y_true, dtype="string")})
+    wide_df = pd.concat([wide_df, scores_df], axis=1)
+    predicted_idx = np.argmax(logits, axis=1)
+    classes_array = np.asarray(class_list, dtype=object)
+    predicted = classes_array[predicted_idx]
+    wide_df["predicted_class"] = pd.Series(predicted, dtype="string")
+    return wide_df
+
+
+def _inject_missing_scores(
+    wide_df: pd.DataFrame,
+    classes: Iterable[str],
+    ratio: float,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if ratio <= 0.0 or wide_df.empty:
+        return wide_df
+    value_columns = [f"{LOGIT_PREFIX}{cls}" for cls in classes]
+    total_cells = len(value_columns) * len(wide_df)
+    if total_cells == 0:
+        return wide_df
+    count = max(1, int(round(total_cells * ratio)))
+    count = min(count, total_cells)
+    wide = wide_df.copy()
+    index_array = wide.index.to_numpy()
+    col_choices = np.arange(len(value_columns))
+    rows = rng.choice(index_array, size=count, replace=True)
+    cols = rng.choice(col_choices, size=count, replace=True)
+    for row, col_idx in zip(rows, cols):
+        wide.at[row, value_columns[col_idx]] = np.nan
+    return wide
+
+
+def _append_duplicates(
+    wide_df: pd.DataFrame,
+    ratio: float,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if ratio <= 0.0 or wide_df.empty:
+        return wide_df
+    count = max(1, int(round(len(wide_df) * ratio)))
+    random_state = int(rng.integers(0, 2**32 - 1))
+    duplicates = wide_df.sample(
+        n=count,
+        replace=len(wide_df) < count,
+        random_state=random_state,
+    ).copy()
+    return pd.concat([wide_df, duplicates], ignore_index=True)
+
+
+def _shuffle_dataframe(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    if len(df) <= 1:
+        return df.reset_index(drop=True)
+    permutation = rng.permutation(len(df))
+    return df.iloc[permutation].reset_index(drop=True)
+
+
+def _attach_sample_ids(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.reset_index(drop=True).copy()
+    df.insert(0, "sample_id", np.arange(len(df), dtype=np.int64))
+    base_columns = ["sample_id"]
+    for column in ("true_label", "predicted_class"):
+        if column in df.columns:
+            base_columns.append(column)
+    score_columns = [col for col in df.columns if col.startswith(LOGIT_PREFIX)]
+    remaining = [col for col in df.columns if col not in base_columns + score_columns]
+    ordered_columns = base_columns + score_columns + remaining
+    return df.loc[:, ordered_columns]
+
+
+def _build_long_dataframe(
+    wide_df: pd.DataFrame,
+    classes: Iterable[str],
+) -> pd.DataFrame:
+    value_vars = [f"{LOGIT_PREFIX}{cls}" for cls in classes]
+    long_df = wide_df.melt(
+        id_vars=["sample_id", "true_label", "predicted_class"],
+        value_vars=value_vars,
+        var_name="predicted_category",
+        value_name="logit_score",
+    )
+    long_df["predicted_category"] = (
+        long_df["predicted_category"].str[len(LOGIT_PREFIX) :].astype("string")
+    )
+    long_df["logit_score"] = long_df["logit_score"].astype(np.float64)
+    return long_df
+
+
+def generate_synthetic_dataset(
+    num_samples: int = 5000,
+    num_classes: int = 10,
+    seed: int | None = 42,
+    imbalance_factor: float = 0.65,
+    near_threshold_proportion: float = 0.08,
+    label_noise: float = 0.02,
+    missing_score_ratio: float = 0.01,
+    duplicate_ratio: float = 0.05,
+    extreme_score_ratio: float = 0.01,
+    extreme_score_scale: float = 12.0,
+) -> SyntheticDataset:
+    _validate_ratio("near_threshold_proportion", near_threshold_proportion)
+    _validate_ratio("label_noise", label_noise, max_value=0.5)
+    _validate_ratio("missing_score_ratio", missing_score_ratio, max_value=0.5)
+    _validate_ratio("duplicate_ratio", duplicate_ratio, max_value=1.0)
+    _validate_ratio("extreme_score_ratio", extreme_score_ratio)
+    if extreme_score_scale <= 0.0:
+        raise ValueError("extreme_score_scale must be positive.")
+    rng = np.random.default_rng(seed)
+    logits, y_true, classes = _generate_logits_internal(
+        num_samples=num_samples,
+        num_classes=num_classes,
+        rng=rng,
+        imbalance_factor=imbalance_factor,
+    )
+    _inject_near_threshold(logits, rng, near_threshold_proportion)
+    _inject_extreme_scores(logits, rng, extreme_score_ratio, extreme_score_scale)
+    y_true = _apply_label_noise(y_true, classes, label_noise, rng)
+    wide_df = _build_wide_dataframe(logits, y_true, classes)
+    wide_df = _inject_missing_scores(wide_df, classes, missing_score_ratio, rng)
+    wide_df = _append_duplicates(wide_df, duplicate_ratio, rng)
+    wide_df = _shuffle_dataframe(wide_df, rng)
+    wide_df = _attach_sample_ids(wide_df)
+    wide_df["true_label"] = wide_df["true_label"].astype("string")
+    wide_df["predicted_class"] = wide_df["predicted_class"].astype("string")
+    long_df = _build_long_dataframe(wide_df, classes)
+    metadata = {
+        "requested_num_samples": int(num_samples),
+        "actual_num_samples": int(len(wide_df)),
+        "num_classes": int(len(classes)),
+        "seed": seed,
+        "imbalance_factor": float(imbalance_factor),
+        "near_threshold_proportion": float(near_threshold_proportion),
+        "label_noise": float(label_noise),
+        "missing_score_ratio": float(missing_score_ratio),
+        "duplicate_ratio": float(duplicate_ratio),
+        "extreme_score_ratio": float(extreme_score_ratio),
+        "extreme_score_scale": float(extreme_score_scale),
+    }
+    return SyntheticDataset(
+        wide=wide_df,
+        long=long_df,
+        classes=tuple(classes),
+        parameters=metadata,
+    )
+
+
+def save_dataset(
+    dataset: SyntheticDataset,
+    output_dir: Path,
+    prefix: str = "synthetic",
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wide_path = output_dir / f"{prefix}_wide.csv"
+    long_path = output_dir / f"{prefix}_long.csv"
+    dataset.wide.to_csv(wide_path, index=False)
+    dataset.long.to_csv(long_path, index=False)
+    return wide_path, long_path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic multiclass classification datasets."
+    )
+    parser.add_argument(
+        "-n",
+        "--num-samples",
+        type=int,
+        default=5000,
+        help="Number of samples to generate (default: 5000).",
+    )
+    parser.add_argument(
+        "-k",
+        "--num-classes",
+        type=int,
+        default=10,
+        help="Number of classes (default: 10).",
+    )
+    parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42).",
+    )
+    parser.add_argument(
+        "--imbalance-factor",
+        type=float,
+        default=0.65,
+        help="Geometric decay factor controlling class imbalance (0,1] (default: 0.65).",
+    )
+    parser.add_argument(
+        "--near-threshold-proportion",
+        type=float,
+        default=0.08,
+        help="Proportion of rows nudged close to the decision threshold (default: 0.08).",
+    )
+    parser.add_argument(
+        "--label-noise",
+        type=float,
+        default=0.02,
+        help="Fraction of labels to randomly flip to alternate classes (default: 0.02).",
+    )
+    parser.add_argument(
+        "--missing-score-ratio",
+        type=float,
+        default=0.01,
+        help="Fraction of score cells set to NaN to emulate missing data (default: 0.01).",
+    )
+    parser.add_argument(
+        "--duplicate-ratio",
+        type=float,
+        default=0.05,
+        help="Fraction of samples to duplicate for robustness checks (default: 0.05).",
+    )
+    parser.add_argument(
+        "--extreme-score-ratio",
+        type=float,
+        default=0.01,
+        help="Fraction of logits replaced with extreme values (default: 0.01).",
+    )
+    parser.add_argument(
+        "--extreme-score-scale",
+        type=float,
+        default=12.0,
+        help="Magnitude of extreme logits injected into the dataset (default: 12.0).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=Path("tests") / "synthetic_data",
+        help="Directory to save the generated CSV files.",
+    )
+    parser.add_argument(
+        "-p",
+        "--prefix",
+        type=str,
+        default="synthetic_dataset",
+        help="Filename prefix for saved outputs.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    dataset = generate_synthetic_dataset(
+        num_samples=args.num_samples,
+        num_classes=args.num_classes,
+        seed=args.seed,
+        imbalance_factor=args.imbalance_factor,
+        near_threshold_proportion=args.near_threshold_proportion,
+        label_noise=args.label_noise,
+        missing_score_ratio=args.missing_score_ratio,
+        duplicate_ratio=args.duplicate_ratio,
+        extreme_score_ratio=args.extreme_score_ratio,
+        extreme_score_scale=args.extreme_score_scale,
+    )
+    wide_path, long_path = save_dataset(dataset, args.output_dir, prefix=args.prefix)
+    meta = dataset.parameters or {}
+    generated = meta.get("actual_num_samples", len(dataset.wide))
+    classes = len(dataset.classes)
+    print(f"Generated {generated} samples across {classes} classes.")
+    print(f"Saved wide dataset to {wide_path}")
+    print(f"Saved long dataset to {long_path}")
+
+
+__all__ = [
+    "SyntheticDataset",
+    "generate_synthetic_logits",
+    "generate_synthetic_dataset",
+    "save_dataset",
+    "parse_args",
+    "main",
+]
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="tests/test_activations.py">
+import numpy as np
+import pytest
+
+from app.utils import activations
+
+
+def test_softmax_rows_sum_to_one():
+    logits = np.array([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]])
+    result = activations.softmax(logits)
+    row_sums = result.sum(axis=1)
+    assert np.allclose(row_sums, 1.0)
+
+
+def test_softmax_numerical_stability_with_large_values():
+    logits = np.array([[1000.0, 1001.0, 1002.0]])
+    result = activations.softmax(logits)
+    expected = np.exp([0.0, 1.0, 2.0]) / np.sum(np.exp([0.0, 1.0, 2.0]))
+    assert np.allclose(result[0], expected, atol=1e-6)
+
+
+def test_sigmoid_extreme_values():
+    x = np.array([-100.0, 0.0, 100.0])
+    result = activations.sigmoid(x)
+    assert np.isclose(result[0], 0.0, atol=1e-12)
+    assert np.isclose(result[1], 0.5, atol=1e-12)
+    assert np.isclose(result[2], 1.0, atol=1e-12)
+
+
+def test_sigmoid_5_scaling():
+    x = np.array([-5.0, 0.0, 5.0])
+    base = activations.sigmoid(x / 5.0)
+    result = activations.sigmoid_5(x)
+    assert np.allclose(result, base)
+
+
+def test_apply_activation_passthrough_none():
+    scores = np.array([[0.2, 0.8], [0.6, 0.4]])
+    result = activations.apply_activation(scores, "none")
+    assert np.allclose(result, scores)
+
+
+def test_apply_activation_softmax_and_sigmoid_variants():
+    scores = np.array([[0.3, -0.7, 1.2]])
+    softmax_result = activations.apply_activation(scores, "softmax")
+    assert np.allclose(softmax_result.sum(axis=1), 1.0)
+
+    sigmoid_result = activations.apply_activation(scores, "sigmoid")
+    expected = activations.sigmoid(scores)
+    assert np.allclose(sigmoid_result, expected)
+
+    sigmoid5_result = activations.apply_activation(scores, "sigmoid_5")
+    expected5 = activations.sigmoid_5(scores)
+    assert np.allclose(sigmoid5_result, expected5)
+
+
+def test_apply_activation_invalid_raises_value_error():
+    scores = np.array([[1.0, 2.0]])
+    with pytest.raises(ValueError):
+        activations.apply_activation(scores, "unknown")
+</file>
+
+<file path="tests/test_metrics.py">
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.metrics import roc_auc_score
+
+from app.utils.metrics import (
+    MetricSummary,
+    compute_classification_metrics,
+    compute_micro_macro_auc,
+    create_metrics_summary,
+    per_class_roc_and_j,
+)
+
+
+@pytest.fixture
+def sample_outputs():
+    classes = ["a", "b", "c"]
+    y_true = np.array(["a", "b", "c", "a", "b", "c"])
+    y_pred = np.array(["a", "b", "a", "c", "b", "c"])
+    scores = np.array(
+        [
+            [0.9, 0.05, 0.05],
+            [0.1, 0.8, 0.1],
+            [0.3, 0.2, 0.5],
+            [0.2, 0.3, 0.5],
+            [0.1, 0.7, 0.2],
+            [0.2, 0.1, 0.7],
+        ]
+    )
+    return y_true, y_pred, scores, classes
+
+
+def test_compute_classification_metrics(sample_outputs):
+    y_true, y_pred, _, _ = sample_outputs
+    metrics = compute_classification_metrics(y_true, y_pred)
+    assert set(metrics.keys()) == {
+        "accuracy",
+        "macro_precision",
+        "macro_recall",
+        "macro_f1",
+    }
+    assert metrics["accuracy"] == pytest.approx(4 / 6)
+    assert 0.0 <= metrics["macro_f1"] <= 1.0
+
+
+def test_per_class_roc_and_j(sample_outputs):
+    y_true, _, scores, classes = sample_outputs
+    df = per_class_roc_and_j(y_true, scores, classes)
+    assert set(df.columns) >= {
+        "auc",
+        "youden_j",
+        "optimal_threshold",
+        "tpr",
+        "fpr",
+        "roc_curve",
+        "support_pos",
+        "support_neg",
+    }
+    assert set(df.index) == set(classes)
+    for cls in classes:
+        curve = df.loc[cls, "roc_curve"]
+        assert isinstance(curve, tuple)
+        assert len(curve) == 2
+
+
+def test_compute_micro_macro_auc(sample_outputs):
+    y_true, _, scores, classes = sample_outputs
+    micro_auc, macro_auc = compute_micro_macro_auc(y_true, scores, classes)
+    manual_micro = roc_auc_score(
+        pd.get_dummies(y_true, drop_first=False).values,
+        scores,
+        average="micro",
+        multi_class="ovr",
+    )
+    manual_macro = roc_auc_score(
+        pd.get_dummies(y_true, drop_first=False).values,
+        scores,
+        average="macro",
+        multi_class="ovr",
+    )
+    assert micro_auc == pytest.approx(manual_micro)
+    assert macro_auc == pytest.approx(manual_macro)
+
+
+def test_create_metrics_summary(sample_outputs):
+    y_true, y_pred, scores, classes = sample_outputs
+    summary = create_metrics_summary(y_true, y_pred, scores, classes)
+    assert isinstance(summary, MetricSummary)
+    assert summary.per_class.index.tolist() == list(classes)
+    assert summary.youden_by_class.index.tolist() == list(classes)
+
+    support_totals = summary.per_class["support_total"]
+    expected_supports = (
+        summary.per_class["support_pos"] + summary.per_class["support_neg"]
+    )
+    pd.testing.assert_series_equal(support_totals, expected_supports, check_names=False)
+    assert (support_totals == len(y_true)).all()
+
+
+def test_per_class_roc_and_j_handles_missing_support():
+    y_true = np.array(["x", "y", "y", "y"])
+    scores = np.array(
+        [
+            [0.1, 0.9],
+            [0.3, 0.7],
+            [0.2, 0.8],
+            [0.4, 0.6],
+        ]
+    )
+    classes = ["x", "y"]
+    df = per_class_roc_and_j(y_true, scores, classes)
+    assert np.isnan(df.loc["x", "auc"])
+    assert df.loc["y", "support_pos"] == 3
+    assert df.loc["x", "support_pos"] == 1
+</file>
+
+<file path="tests/test_thresholds.py">
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.utils.thresholds import (
+    compute_optimal_thresholds_youden,
+    predict_with_thresholds,
+    select_predicted_class,
+)
+
+
+@pytest.fixture
+def sample_scores():
+    classes = ["cat", "dog", "rabbit"]
+    scores = np.array(
+        [
+            [0.9, 0.2, -0.5],
+            [0.1, 0.6, 0.3],
+            [0.2, 0.2, 0.1],
+            [-0.2, 0.8, 0.4],
+        ]
+    )
+    y_true = np.array(["cat", "dog", "cat", "dog"])
+    return scores, y_true, classes
+
+
+def test_predict_with_thresholds_basic(sample_scores):
+    scores, y_true, classes = sample_scores
+    thresholds = {"cat": 0.3, "dog": 0.5, "rabbit": 0.4}
+    result = predict_with_thresholds(
+        scores,
+        classes,
+        thresholds=thresholds,
+        activation="sigmoid",
+        fallback_class="cat",
+    )
+
+    assert result.activated_scores.shape == scores.shape
+    assert result.mask.shape == scores.shape
+    assert result.masked_scores.shape == scores.shape
+    assert len(result.predictions) == scores.shape[0]
+    assert set(result.predictions).issubset(set(classes + ["cat"]))
+
+
+def test_select_predicted_class_with_no_valid_scores():
+    masked = np.full((3, 2), -np.inf)
+    predictions = select_predicted_class(
+        masked, fallback_class="fallback", classes=["a", "b"]
+    )
+    assert np.all(predictions == "fallback")
+
+
+def test_compute_optimal_thresholds_handles_missing_support(sample_scores):
+    scores, y_true, classes = sample_scores
+    y_modified = y_true.copy()
+    y_modified[y_modified == "cat"] = "dog"
+    df = compute_optimal_thresholds_youden(
+        y_true=y_modified,
+        y_scores=scores,
+        classes=classes,
+    )
+    assert set(df.index) == set(classes)
+    assert pd.isna(df.loc["rabbit", "optimal_threshold"])
+    assert df.loc["dog", "support_pos"] > 0
+    assert df.loc["cat", "support_pos"] == 0
+
+
+def test_predict_with_thresholds_softmax_scalar_threshold(sample_scores):
+    scores, y_true, classes = sample_scores
+    result = predict_with_thresholds(
+        scores,
+        classes,
+        thresholds=0.5,
+        activation="softmax",
+        fallback_class="dog",
+    )
+    assert result.mask.dtype == bool
+    assert len(result.predictions) == scores.shape[0]
+    assert "dog" in result.predictions
+</file>
+
+<file path="AGENTS.md">
+# Agent Handoff Notes
+
+## Latest Changes (2025-10-31)
+
+- Introduced dynamic column inference and override support inside the Streamlit sidebar.
+- Added [`ColumnCandidates`](app/utils/data_io.py#L66) and [`ColumnSelection`](app/utils/data_io.py#L52) types to capture inferred defaults and user choices.
+- Extended [`validate_data`](app/utils/data_io.py#L202) to honour explicit column selections while maintaining robust auto-detection.
+- Updated [`prepare_dataset`](app/main.py#L63) to accept caller-provided `ColumnSelection` instances and align true labels using the resolved column name.
+- Created new regression coverage in [`tests/test_data_io.py`](tests/test_data_io.py#L1) for wide/long selection paths and column inference.
+- Refreshed [`README.md`](README.md#L63) documentation to describe the new Column Mapping workflow and testing instructions.
+
+## Operational Checklist
+
+1. Run the full suite before shipping changes:
+
+   ```bash
+   uv run --dev pytest -v
+   ```
+
+2. When modifying column handling:
+   - Keep `ColumnCandidates` exhaustive enough to cover common customer schemas.
+   - Update [`infer_column_candidates`](app/utils/data_io.py#L120) alongside the README examples.
+   - Ensure any new defaults flow through [`column_selection`](app/main.py#L556) to maintain UI coherence.
+
+3. For UI additions in the Column Mapping panel:
+   - Store selections in `st.session_state` using the `column_mapping_*` prefix to leverage cache invalidation logic on signature changes.
+   - Reset threshold-related session keys whenever the selection signature changes to avoid stale state.
+
+4. If adding new exports or data artefacts:
+   - Document them in the README exports section.
+  - Provide regression coverage either in existing test modules or create a new targeted test file.
+
+
+5. Type check using `ty`.
+
+```bash
+uv run ty check
+```
+
+## Known Considerations
+
+- Long-format datasets without a reliable sample identifier fall back to synthetic row indices. Downstream alignment still works, but warn users in UI if you detect potential duplicates.
+- Wide-format uploads with fewer than two score columns display an informational message; consider tightening this into a blocking validation if required.
+
+## Future Opportunities
+
+- Auto-persist the column selection signature so users reopening the app with the same schema skip manual remapping.
+- Surface quick validation badges (e.g., ✅ Numeric / ⚠️ Missing) next to each column selector in the sidebar for richer feedback.
+- Explore support for multi-file uploads (scores + metadata) by extending `ColumnSelection` to track auxiliary frames.
+
+Keep this file updated after each significant change so future agents can land quickly.
+</file>
+
+<file path="app/assets/styles.css">
+/*
+Streamlit global styling overrides for the multiclass threshold tuner.
+The stylesheet assumes injection via st.markdown(..., unsafe_allow_html=True).
+*/
+
+/* Root typography and base colours */
+:root {
+    --primary-font: "Menlo", monospace;
+    --background-dark: #0b1e26;
+    --background-light: #f4f8fb;
+    --accent: #1f8ac0;
+    --accent-muted: #8fc6de;
+    --card-bg: rgba(255, 255, 255, 0.92);
+    --border-colour: rgba(31, 138, 192, 0.12);
+    --divider-colour: rgba(15, 34, 44, 0.18);
+}
+
+html, body, [class*="css"] {
+    font-family: var(--primary-font);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    background-color: var(--background-light);
+    color: #0f222c;
+}
+
+/* Ensure Streamlit markdown and widgets inherit the monospace font */
+section.main, .stMarkdown, .stText, .stSelectbox, .stSlider, .stMultiSelect, .stButton, .stNumberInput, .stCheckbox {
+    font-family: var(--primary-font);
+}
+
+/* Sidebar styling */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(11, 30, 38, 0.95) 0%, rgba(11, 30, 38, 0.88) 100%);
+    border-right: 1px solid var(--border-colour);
+    box-shadow: 2px 0 18px rgba(15, 34, 44, 0.35);
+    padding: 1.6rem 1.2rem;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent-muted);
+}
+
+[data-testid="stSidebar"] .stSlider > div > div > div > div {
+    background-color: var(--accent);
+}
+
+[data-testid="stSidebar"] .stCheckbox,
+[data-testid="stSidebar"] .stSelectbox,
+[data-testid="stSidebar"] .stMultiSelect {
+    background-color: rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid rgba(140, 198, 222, 0.35);
+}
+
+[data-testid="stSidebar"] p {
+    color: #ecf4f8;
+}
+
+/* Main area layout */
+section.main > div {
+    padding: 1.5rem 2rem 3rem;
+}
+
+.stApp header {
+    background: transparent;
+}
+
+.main-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    border: 1px solid var(--border-colour);
+    padding: 1.4rem 1.8rem;
+    box-shadow: 0 15px 40px rgba(15, 34, 44, 0.08);
+    margin-bottom: 1.5rem;
+}
+
+.metric-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.2rem;
+}
+
+.metric-card {
+    border: 1px solid var(--border-colour);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.metric-card h3 {
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.4rem;
+    color: #326a82;
+}
+
+.metric-card .value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #0b1e26;
+}
+
+/* Tables for Youden's J display */
+table.youden-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.8rem;
+    font-size: 0.92rem;
+}
+
+table.youden-table thead {
+    background-color: rgba(31, 138, 192, 0.12);
+}
+
+table.youden-table th,
+table.youden-table td {
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--divider-colour);
+    text-align: left;
+}
+
+table.youden-table tbody tr:nth-child(even) {
+    background-color: rgba(255, 255, 255, 0.65);
+}
+
+table.youden-table tbody tr:hover {
+    background-color: rgba(31, 138, 192, 0.08);
+}
+
+/* Download buttons section */
+.download-buttons {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    margin-top: 1.2rem;
+}
+
+.download-buttons .stButton button {
+    border-radius: 50px;
+    background-color: var(--accent);
+    border: none;
+    padding: 0.45rem 1.3rem;
+    color: #f8fcff;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.82rem;
+    box-shadow: 0 6px 18px rgba(31, 138, 192, 0.22);
+}
+
+.download-buttons .stButton button:hover {
+    background-color: #16668a;
+}
+
+/* Plot containers */
+.plot-container {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.2rem;
+    border: 1px solid var(--border-colour);
+    margin-bottom: 1.5rem;
+}
+
+/* Ensure Streamlit info/warning boxes remain legible on dark backdrop */
+.stAlert {
+    font-family: var(--primary-font);
+    letter-spacing: 0.04em;
+}
+</file>
+
+<file path="app/utils/activations.py">
+"""
+Activation utilities for transforming model score matrices prior to thresholding.
+
+These helpers are intentionally vectorised to support large (50k+) sample batches
+without Python loops.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+import numpy as np
+
+ActivationType = Literal["none", "softmax", "sigmoid", "sigmoid_5"]
+
+
+def _as_float_array(values: np.ndarray | list | tuple) -> np.ndarray:
+    """Convert arbitary array-like values to a float64 NumPy array."""
+    return np.asarray(values, dtype=np.float64)
+
+
+def softmax(logits: np.ndarray, axis: int = -1) -> np.ndarray:
+    """
+    Numerically stable softmax across the class axis.
+
+    Parameters
+    ----------
+    logits:
+        Raw score matrix shaped (..., n_classes).
+    axis:
+        Axis across which softmax is applied (defaults to last axis).
+
+    Returns
+    -------
+    np.ndarray
+        Probability matrix with the same shape as ``logits``.
+    """
+
+    if logits.ndim == 0:
+        return np.array(1.0, dtype=np.float64)
+
+    max_scores = np.max(logits, axis=axis, keepdims=True)
+    stabilised = logits - max_scores
+    np.nan_to_num(stabilised, copy=False)
+
+    exp_logits = np.exp(stabilised)
+    sum_exp = np.sum(exp_logits, axis=axis, keepdims=True)
+    sum_exp[sum_exp == 0.0] = 1.0  # prevent division by zero
+
+    probabilities = exp_logits / sum_exp
+    return probabilities
+
+
+def sigmoid(logits: np.ndarray | list | tuple) -> np.ndarray:
+    """
+    Compute the logistic sigmoid elementwise in a numerically stable manner.
+    """
+    # Convert to ndarray first to ensure proper type for comparison
+    logits_array = _as_float_array(logits)
+    result = np.empty_like(logits_array, dtype=np.float64)
+
+    positive_mask = logits_array >= 0
+    negative_mask = ~positive_mask
+
+    result[positive_mask] = 1.0 / (1.0 + np.exp(-logits_array[positive_mask]))
+
+    exp_logits = np.exp(logits_array[negative_mask])
+    result[negative_mask] = exp_logits / (1.0 + exp_logits)
+
+    return result
+
+
+def sigmoid_5(logits: np.ndarray | list | tuple) -> np.ndarray:
+    """
+    Custom sigmoid variant with a scale factor of 5:
+        1 / (1 + exp(-x / 5))
+    """
+    scaled_logits = _as_float_array(logits) / 5.0
+    return sigmoid(scaled_logits)
+
+
+def apply_activation(
+    scores: np.ndarray | list | tuple,
+    activation_type: str | None,
+) -> np.ndarray:
+    """
+    Apply the requested activation function to the provided scores.
+
+    Parameters
+    ----------
+    scores:
+        Score matrix (n_samples, n_classes).
+    activation_type:
+        One of {"none", "softmax", "sigmoid", "sigmoid_5"} (case-insensitive).
+        ``None`` defaults to "none".
+
+    Returns
+    -------
+    np.ndarray
+        Activated score matrix.
+    """
+    activation = (activation_type or "none").lower()
+
+    logits = _as_float_array(scores)
+
+    if activation in {"none", "raw"}:
+        return logits
+    if activation == "softmax":
+        return softmax(logits)  # Ensure np.ndarray type
+    if activation == "sigmoid":
+        return sigmoid(logits)
+    if activation in {"sigmoid_5", "sigmoid5"}:
+        return sigmoid_5(logits)
+
+    raise ValueError(
+        f"Unsupported activation_type '{activation_type}'. "
+        "Expected one of {'none', 'softmax', 'sigmoid', 'sigmoid_5'}."
+    )
+
+
+__all__ = [
+    "ActivationType",
+    "softmax",
+    "sigmoid",
+    "sigmoid_5",
+    "apply_activation",
+]
+</file>
+
+<file path="app/utils/exports.py">
+"""
+Export utilities for persisting model artefacts and evaluation results.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Iterable
+from matplotlib.figure import Figure
+
+
+import pandas as pd
+
+FIGURE_DIR = Path("app") / "outputs" / "figures"
+PREDICTION_DIR = Path("app") / "outputs" / "predictions"
+REPORT_DIR = Path("app") / "outputs" / "reports"
+
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _snake_case(name: str) -> str:
+    safe = "".join(char if char.isalnum() else "_" for char in name.lower())
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_")
+
+
+def generate_timestamp() -> str:
+    """
+    Generate a consistent timestamp format for filenames.
+    """
+    return pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def save_classification_report(
+    report: dict,
+    timestamp: str | None = None,
+    base_name: str = "classification_report",
+    output_dir: Path | None = None,
+) -> dict[str, Path]:
+    """
+    Persist a classification report dictionary as JSON and CSV.
+    """
+    timestamp = timestamp or generate_timestamp()
+    output_dir = _ensure_dir(output_dir or REPORT_DIR)
+
+    base = output_dir / f"{_snake_case(base_name)}_{timestamp}"
+
+    json_path = base.with_suffix(".json")
+    csv_path = base.with_suffix(".csv")
+
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    df = pd.DataFrame(report)
+    df.to_csv(csv_path, index=False)
+
+    return {"json": json_path, "csv": csv_path}
+
+
+def save_confusion_matrix_image(
+    fig,
+    timestamp: str | None = None,
+    base_name: str = "confusion_matrix",
+    output_dir: Path | None = None,
+    dpi: int = 300,
+) -> Path:
+    """
+    Save the confusion matrix Matplotlib figure as a PNG file.
+    """
+    timestamp = timestamp or generate_timestamp()
+    output_dir = _ensure_dir(output_dir or FIGURE_DIR)
+    path = output_dir / f"{_snake_case(base_name)}_{timestamp}.png"
+
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return path
+
+
+def save_roc_images(
+    figures: dict[str, object],
+    classes: Iterable[str],
+    timestamp: str | None = None,
+    output_dir: Path | None = None,
+    dpi: int = 300,
+    base_prefix: str = "roc_curve",
+) -> dict[str, Path]:
+    """
+    Save a dictionary of ROC Matplotlib figures returned by ``plot_per_class_roc``.
+    """
+    timestamp = timestamp or generate_timestamp()
+    output_dir = _ensure_dir(output_dir or FIGURE_DIR)
+
+    saved_paths: dict[str, Path] = {}
+    for cls in classes:
+        fig = figures.get(cls)
+        if fig is None:
+            continue
+        if isinstance(fig, Figure):  # Proper type guard for matplotlib Figure
+            filename = f"{_snake_case(base_prefix)}_{_snake_case(cls)}_{timestamp}.png"
+            path = output_dir / filename
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            saved_paths[cls] = path
+
+    combined_fig = figures.get("combined")
+    if combined_fig is not None and isinstance(combined_fig, Figure):
+        filename = f"{_snake_case(base_prefix)}_combined_{timestamp}.png"
+        path = output_dir / filename
+        combined_fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        saved_paths["combined"] = path
+
+    return saved_paths
+
+
+def save_predictions_csv(
+    df: pd.DataFrame,
+    thresholds: dict[str, float] | pd.DataFrame,
+    timestamp: str | None = None,
+    base_name: str = "predictions",
+    output_dir: Path | None = None,
+) -> Path:
+    """
+    Save predictions with associated scores and thresholds.
+    """
+    timestamp = timestamp or generate_timestamp()
+    output_dir = _ensure_dir(output_dir or PREDICTION_DIR)
+
+    path = output_dir / f"{_snake_case(base_name)}_{timestamp}.csv"
+    df_copy = df.copy()
+
+    if isinstance(thresholds, pd.DataFrame):
+        threshold_series = thresholds.squeeze()
+    else:
+        threshold_series = pd.Series(thresholds, name="threshold")
+
+    threshold_df = threshold_series.reset_index()
+    threshold_df.columns = ["class", "threshold"]
+
+    # join thresholds into dataframe (one row per prediction)
+    if "predicted_class" in df_copy.columns:
+        df_copy = df_copy.merge(
+            threshold_df,
+            how="left",
+            left_on="predicted_class",
+            right_on="class",
+        )
+        df_copy.drop(columns=["class"], inplace=True)
+
+    df_copy.to_csv(path, index=False)
+    return path
+
+
+__all__ = [
+    "generate_timestamp",
+    "save_classification_report",
+    "save_confusion_matrix_image",
+    "save_roc_images",
+    "save_predictions_csv",
+]
+</file>
+
+<file path="tests/test_data_io.py">
+import numpy as np
+import pandas as pd
+
+from app.utils.data_io import (
+    ColumnCandidates,
+    ColumnSelection,
+    infer_column_candidates,
+    prepare_score_matrix,
+    validate_data,
+)
+
+
+def _assert_column_candidates(candidate: ColumnCandidates) -> None:
+    assert isinstance(candidate.true_label_default, str)
+    assert candidate.true_label_default in candidate.true_label_options
+    assert candidate.default_format in ("wide", "long")
+
+
+def test_infer_column_candidates_wide_defaults() -> None:
+    df = pd.DataFrame(
+        {
+            "id": [1, 2],
+            "ground_truth": ["cat", "dog"],
+            "score_cat": [0.9, 0.1],
+            "score_dog": [0.1, 0.8],
+        }
+    )
+
+    candidates = infer_column_candidates(df)
+
+    _assert_column_candidates(candidates)
+    assert candidates.default_format == "wide"
+    assert candidates.true_label_default == "ground_truth"
+    assert set(candidates.wide_score_default) == {"score_cat", "score_dog"}
+    assert "score_cat" in candidates.wide_score_options
+    assert "score_dog" in candidates.wide_score_options
+
+
+def test_validate_data_with_explicit_wide_selection() -> None:
+    df = pd.DataFrame(
+        {
+            "customer_id": [1, 2, 3],
+            "actual": ["positive", "negative", "positive"],
+            "prob_positive": [0.7, 0.2, 0.9],
+            "prob_negative": [0.3, 0.8, 0.1],
+        }
+    )
+
+    selection = ColumnSelection(
+        format="wide",
+        true_label="actual",
+        wide_score_columns=("prob_positive", "prob_negative"),
+        sample_id_column="customer_id",
+    )
+    metadata = validate_data(df, column_selection=selection)
+
+    assert metadata.format == "wide"
+    assert metadata.true_label_column == "actual"
+    assert metadata.sample_id_column == "customer_id"
+    assert metadata.class_to_column == {
+        "positive": "prob_positive",
+        "negative": "prob_negative",
+    }
+
+    scores, index = prepare_score_matrix(df, metadata=metadata, return_index=True)
+    assert scores.shape == (3, 2)
+    np.testing.assert_array_equal(index.to_numpy(), df.index.to_numpy())
+
+
+def test_validate_data_with_explicit_long_selection() -> None:
+    df = pd.DataFrame(
+        {
+            "record_id": [101, 101, 202],
+            "target": ["spam", "spam", "ham"],
+            "predicted_label": ["spam", "ham", "spam"],
+            "probability": [0.9, 0.1, 0.6],
+        }
+    )
+
+    selection = ColumnSelection(
+        format="long",
+        true_label="target",
+        long_class_column="predicted_label",
+        long_score_column="probability",
+        sample_id_column="record_id",
+    )
+    metadata = validate_data(df, column_selection=selection)
+
+    assert metadata.format == "long"
+    assert metadata.true_label_column == "target"
+    assert metadata.long_class_column == "predicted_label"
+    assert metadata.long_score_column == "probability"
+    assert metadata.sample_id_column == "record_id"
+    assert set(metadata.classes) == {"spam", "ham"}
+
+    scores, index = prepare_score_matrix(df, metadata=metadata, return_index=True)
+    assert scores.shape == (2, len(metadata.classes))
+    assert set(index.to_numpy()) == {101, 202}
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#   Usually these files are written by a python script from a template
+#   before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+#   For a library or package, you might want to ignore these files since the code is
+#   intended to run in multiple environments; otherwise, check them in:
+# .python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+# Pipfile.lock
+
+# UV
+#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+# uv.lock
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+# poetry.lock
+# poetry.toml
+
+# pdm
+#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
+#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
+# pdm.lock
+# pdm.toml
+.pdm-python
+.pdm-build/
+
+# pixi
+#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
+# pixi.lock
+#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
+#   in the .venv directory. It is recommended not to include this directory in version control.
+.pixi
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# Redis
+*.rdb
+*.aof
+*.pid
+
+# RabbitMQ
+mnesia/
+rabbitmq/
+rabbitmq-data/
+
+# ActiveMQ
+activemq-data/
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#   and can be added to the global gitignore or merged into this file.  For a more nuclear
+#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
+# .idea/
+
+# Abstra
+#   Abstra is an AI-powered process automation framework.
+#   Ignore directories containing user credentials, local state, and settings.
+#   Learn more at https://abstra.io/docs
+.abstra/
+
+# Visual Studio Code
+#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
+#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#   you could uncomment the following to ignore the entire vscode folder
+# .vscode/
+
+# Ruff stuff:
+.ruff_cache/
+
+# PyPI configuration file
+.pypirc
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# Streamlit
+.streamlit/secrets.toml
+data/
+synthetic_data/
+</file>
+
+<file path="README.md">
+# Multiclass Threshold Tuner
+
+Interactive Streamlit application for tuning multiclass classification thresholds, visualising performance metrics, and exporting analysis artifacts.
+
+This README summarises the current implementation, how to run the app, how to exercise the testing stack, and how to stress-test the system with the synthetic data tools bundled in this repository.
+
+## Key Capabilities
+
+- Upload logits or probability CSVs in "wide" or "long" form, automatically infer column mappings, and optionally override selections via the sidebar.
+- Apply activation functions (none, softmax, sigmoid, sigmoid_5) with per-class thresholding and fallbacks.
+- Compute confusion matrices, ROC/PR curves, aggregated metrics, and Youden's J statistics with robust handling for zero-support classes.
+- Export metrics, ROC figures, and prediction CSVs with consistent timestamps.
+- Generate synthetic datasets with configurable edge cases (class imbalance, near-threshold noise, missing scores, extremes, duplicates).
+
+## Repository Layout
+
+- [`app/main.py`](app/main.py) — Streamlit entrypoint and UI logic.
+- [`app/utils/metrics.py`](app/utils/metrics.py) — Metric aggregation, ROC/Youden handling, and summary dataclasses.
+- [`app/utils/thresholds.py`](app/utils/thresholds.py) — Threshold application and optimal Youden threshold computation.
+- [`app/utils/data_io.py`](app/utils/data_io.py) — CSV loading, schema validation, and score matrix preparation.
+- [`app/utils/plots.py`](app/utils/plots.py) — Confusion matrix and ROC figure generation.
+- [`app/utils/exports.py`](app/utils/exports.py) — Metrics, figures, and predictions export helpers.
+- [`tests/test_metrics.py`](tests/test_metrics.py) & [`tests/test_thresholds.py`](tests/test_thresholds.py) — Focused regression coverage for metrics and threshold edge cases.
+- [`tests/test_data_io.py`](tests/test_data_io.py) — Column inference, selection, and score matrix preparation coverage.
+- [`tests/generate_synthetic_data.py`](tests/generate_synthetic_data.py) — CLI generator for synthetic datasets with optional edge-case injection.
+
+## Environment Setup
+
+This project uses [uv](https://github.com/astral-sh/uv) to manage Python execution. Install uv if it is not already available:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Install the project dependencies (uv will create an isolated environment automatically):
+
+```bash
+uv sync
+```
+
+## Running the Streamlit Application
+
+1. Ensure the dependency environment is prepared (see above).
+2. Start the application with uv:
+
+```bash
+source .venv/bin/activate
+streamlit run app/main.py
+```
+
+3. Open the URL shown in the console (defaults to http://localhost:8502/) to interact with the UI.
+
+### Streamlit Workflow Checklist
+
+Use this checklist while validating the UI with large synthetic datasets (e.g. `tests/synthetic_data/synthetic_50k_wide.csv` and `tests/synthetic_data/synthetic_50k_long.csv`):
+
+- Data loading succeeds for both wide and long formats (auto delimiter detection works).
+- Activation selection (none, softmax, sigmoid, sigmoid_5) updates the probability interpretation.
+- Global and per-class threshold sliders respond immediately, including automatic Youden-derived modes.
+- Metrics cards update accuracy / macro metrics; micro & macro AUC render as expected for missing-support classes.
+- Confusion matrix, ROC overlays, and PR curves render without errors at 50k+ rows.
+- Exports (metrics, ROC figures, confusion matrix, predictions) write files into [`app/outputs/`](app/outputs/) without exceptions.
+
+## Column Mapping Workflow
+
+A dedicated **Column Mapping** panel in the sidebar now guides dataset setup:
+
+1. The app inspects the uploaded CSV and proposes defaults for layout (wide vs. long), true label, sample identifier, and score columns.
+2. You can override any proposed column with dropdowns and multiselects—ideal when headers differ from the defaults (e.g. `ground_truth`, `probability`, `pred_label`).
+3. Changing mappings resets cached thresholds and filters to keep the UI aligned with the current dataset.
+
+The resulting selection is passed to [`app/utils/data_io.py`](app/utils/data_io.py) through [`ColumnSelection`](app/utils/data_io.py#L52) so downstream validation and preprocessing stay consistent.
+
+## Data Format
+
+### Wide Format
+
+- Recommended columns: a true-label column plus one score/logit column per class (`score_{class_name}`/`logit_{class_name}` etc.).
+- Optional columns: sample identifiers or metadata (retained in exports).
+- Example header: `sample_id,true_label,score_class_00,score_class_01,...`.
+- If your headers differ, use the Column Mapping panel to identify the true label and score columns explicitly.
+
+### Long Format
+
+- Recommended columns: true label, predicted class/category, numeric score/logit per row.
+- Optional columns: sample identifier for grouping repeated rows, plus any additional metadata.
+- Each row encodes a (sample, class) pair; the loader pivots to wide matrices automatically.
+- Override the predicted class, score, and sample identifier selections in the Column Mapping panel when the defaults do not match.
+
+Data validation enforces non-empty datasets, consistent class coverage, and infers class order from observed columns. Missing logit values are imputed to `-inf` before activation to avoid threshold leakage.
+
+## Metrics & Threshold Handling Notes
+
+- [`app/utils/metrics.py`](app/utils/metrics.py) gracefully returns NaN AUC/Youden values for classes without positive or negative support.
+- [`app/utils/metrics.py`](app/utils/metrics.py) aggregates per-class support via `support_pos + support_neg` and casts AUC columns to floats for consistent downstream rendering.
+- [`app/utils/thresholds.py`](app/utils/thresholds.py) provides Youden-optimal thresholds while returning NaN / sentinel statistics for missing-support classes, ensuring downstream tables remain stable.
+
+These behaviours are covered by unit tests so regressions surface quickly.
+
+## Synthetic Data Generation
+
+The generator creates both wide and long CSVs with configurable edge-case controls.
+
+### Quick Example (10k samples)
+
+```bash
+uv run python tests/generate_synthetic_data.py --num-samples 10000 --output-dir tests/synthetic_data --prefix synthetic_10k
+```
+
+### Required Arguments
+
+- `--num-samples` *(int, default 5000)* — Number of base samples to generate (duplicates may add more).
+- `--num-classes` *(int, default 10)* — Distinct class labels (named `class_00`, `class_01`, ...).
+
+### Edge-Case Controls
+
+- `--imbalance-factor` — Geometric decay controlling class prevalence (0 < factor ≤ 1).
+- `--near-threshold-proportion` — Proportion forced near decision boundaries.
+- `--label-noise` — Fraction of labels randomly flipped to alternate classes.
+- `--missing-score-ratio` — Fraction of logit cells set to NaN.
+- `--extreme-score-ratio` / `--extreme-score-scale` — Inject extreme logits to stress activation clipping.
+- `--duplicate-ratio` — Duplicates rows to replicate repeated samples.
+
+Generated files are written to the supplied `--output-dir` as `{prefix}_wide.csv` and `{prefix}_long.csv`.
+
+## Testing
+
+Run the focused regression suite with uv:
+
+```bash
+uv run pytest tests/test_metrics.py tests/test_thresholds.py tests/test_data_io.py -v
+```
+
+Common targeted invocations:
+
+```bash
+uv run pytest tests/test_metrics.py::test_per_class_roc_and_j_handles_missing_support -v
+uv run pytest tests/test_metrics.py::test_create_metrics_summary -v
+uv run pytest tests/test_thresholds.py::test_compute_optimal_thresholds_handles_missing_support -v
+uv run pytest tests/test_thresholds.py::test_select_predicted_class_with_no_valid_scores -v
+uv run pytest tests/test_data_io.py::test_validate_data_with_explicit_wide_selection -v
+uv run pytest tests/test_data_io.py::test_validate_data_with_explicit_long_selection -v
+```
+
+## Performance Tips
+
+- Use activation-aware threshold bounds (the UI clips sliders between [0,1] for probability activations and [-10,10] for raw logits).
+- The Streamlit pipeline caches CSV parsing, dataset preparation, and prediction/metric computation to keep update times sub-second even for 50k+ rows.
+- When experimenting with massive datasets, close unused browser tabs and monitor console memory usage; the generator can exceed requested rows because of duplicates.
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Remedy |
+| --- | --- | --- |
+| CSV upload fails with delimiter error | Nonstandard delimiter | Supply `Delimiter override` in the sidebar |
+| Metrics display NaN for AUC/Youden | Class lacks positive/negative support | This is expected; thresholds fall back to defaults |
+| Exports missing | Output directory unwritable | Ensure [`app/outputs/`](app/outputs/) is writable or adjust permissions |
+| Streamlit UI sluggish | Large figures queued | Close redundant plots or restart the app to clear cache |
+
+## Roadmap
+
+Future enhancements noted in [`PROJECT_SPEC.md`](PROJECT_SPEC.md) include precision-recall curve expansions, Plotly visualisations, and extended documentation screenshots.
+
+## License
+
+MIT License. See [`LICENSE`](LICENSE) if present, or customise as required for your deployment.
+
+---
+
+For questions or contributions, open an issue or submit a pull request.
+</file>
+
+<file path="app/utils/plots.py">
+"""
+Plotting helpers for visualising evaluation outputs inside Streamlit.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable, Mapping, Sequence
+
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure as MplFigure
+import numpy as np
+import seaborn as sns
+from matplotlib.colors import PowerNorm
+from matplotlib.ticker import MaxNLocator
+from sklearn.metrics import auc, confusion_matrix
+
+sns.set_theme(context="notebook", style="whitegrid")
+
+
+DEFAULT_FONT_FAMILY = "Menlo, monospace"
+FIGURE_DIR = Path("app") / "outputs" / "figures"
+
+
+def _ensure_output_dir(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _snake_case(name: str) -> str:
+    safe = "".join(char if char.isalnum() else "_" for char in name.lower())
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_")
+
+
+def plot_confusion_matrix_raw(
+    y_true: Sequence,
+    y_pred: Sequence,
+    classes: Sequence[str],
+    f1_macro: float | None = None,
+    output_path: str | Path | None = None,
+    dpi: int = 300,
+):
+    """
+    Render a confusion matrix heatmap styled for the Streamlit app.
+    """
+    classes = list(classes)
+    matrix = confusion_matrix(y_true, y_pred, labels=classes)
+
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    norm = PowerNorm(gamma=0.2)
+    sns.heatmap(
+        matrix,
+        annot=True,
+        fmt="d",
+        cmap="YlGnBu",
+        norm=norm,
+        cbar=True,
+        ax=ax,
+        linewidths=0.5,
+        linecolor="white",
+    )
+
+    ax.set_xlabel("Predicted class", fontweight="bold")
+    ax.set_ylabel("True class", fontweight="bold")
+    ax.set_xticklabels(classes, rotation=45, ha="right")
+    ax.set_yticklabels(classes, rotation=0)
+
+    title = "Confusion Matrix"
+    if f1_macro is not None:
+        title += f" (F1-Macro: {f1_macro:.4f})"
+    ax.set_title(title, fontweight="bold")
+
+    fig.tight_layout()
+
+    if output_path:
+        path = _ensure_output_dir(Path(output_path))
+        if path is not None:  # Type guard
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+
+    return fig
+
+
+def format_roc_figure(ax: plt.Axes, title: str | None = None) -> None:
+    """
+    Apply consistent styling to ROC axis.
+    """
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.xaxis.set_major_locator(MaxNLocator(5))
+    ax.yaxis.set_major_locator(MaxNLocator(5))
+    ax.grid(True, which="both", linestyle="--", linewidth=0.7, alpha=0.4)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    if title:
+        ax.set_title(title, fontweight="bold")
+    ax.legend(loc="lower right")
+
+
+def plot_per_class_roc(
+    roc_data: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    classes: Iterable[str],
+    filter_classes: Iterable[str] | None = None,
+    layout: tuple[int, int] | None = None,
+    output_prefix: str | None = None,
+    dpi: int = 300,
+) -> dict[str, MplFigure]:
+    """
+    Create individual or multi-panel ROC curves from pre-computed ROC data.
+
+    Uses the tab20 colour palette (up to 20 classes) with a rainbow fallback
+    and appends AUC scores to legend entries for improved readability.
+    """
+    class_order = [cls for cls in classes if cls in roc_data]
+    if filter_classes is not None:
+        selected = set(filter_classes)
+        class_order = [cls for cls in class_order if cls in selected]
+
+    if not class_order:
+        raise ValueError("No classes available for ROC plotting with given filter.")
+
+    num_classes = len(class_order)
+    if num_classes <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, 20))[:num_classes]
+    else:
+        colors = plt.cm.rainbow(np.linspace(0, 1, num_classes))
+    color_map = {cls: colors[idx] for idx, cls in enumerate(class_order)}
+
+    figures: dict[str, MplFigure] = {}
+    needs_save = output_prefix is not None
+    output_prefix = output_prefix or "roc"
+
+    if layout is None:
+        cols = min(3, len(class_order))
+        rows = int(np.ceil(len(class_order) / cols))
+    else:
+        rows, cols = layout
+
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+    multi_fig: MplFigure | None = None
+    multi_axes = None
+    create_multi = len(class_order) > 1
+
+    if create_multi:
+        multi_fig, multi_axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
+        axes_iter = np.ravel(multi_axes)
+    else:
+        _, ax = plt.subplots(figsize=(6, 5))
+        axes_iter = [ax]
+
+    for idx, cls in enumerate(class_order):
+        fpr, tpr = roc_data[cls]
+        ax = axes_iter[idx] if create_multi else axes_iter[0]
+
+        auc_score = auc(fpr, tpr)
+        ax.plot(
+            fpr,
+            tpr,
+            color=color_map[cls],
+            linewidth=2,
+            label=f"{cls} (AUC={auc_score:.3f})",
+        )
+        ax.plot([0, 1], [0, 1], linestyle="--", color="grey", alpha=0.7)
+        format_roc_figure(ax, f"ROC Curve — {cls}")
+
+        if not create_multi:
+            fig = ax.get_figure()
+            if fig is not None and isinstance(fig, MplFigure):
+                figures[str(cls)] = fig
+                if needs_save:
+                    filename = (
+                        FIGURE_DIR
+                        / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
+                    )
+                    path = _ensure_output_dir(filename)
+                    if path is not None:
+                        fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
+
+    if create_multi:
+        for idx in range(len(class_order), len(axes_iter)):
+            axes_iter[idx].axis("off")
+        if multi_fig is not None and isinstance(multi_fig, MplFigure):
+            multi_fig.tight_layout()
+            if needs_save:
+                filename = FIGURE_DIR / f"{_snake_case(output_prefix)}_combined.png"
+                path = _ensure_output_dir(filename)
+                if path is not None:
+                    multi_fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
+            figures["combined"] = multi_fig
+
+    return figures
+
+
+def plotcombinedrocallmodels(
+    models_roc_data: Mapping[str, Mapping[str, tuple[np.ndarray, np.ndarray]]],
+    model_names: Sequence[str],
+    classes: Sequence[str],
+    filterclasses: Sequence[str] | None = None,
+    outputpath: str | Path | None = None,
+    dpi: int = 300,
+) -> plt.Figure | None:
+    """
+    Render side-by-side ROC curves for multiple models, reusing class colours.
+
+    Parameters
+    ----------
+    models_roc_data:
+        Mapping of model name -> mapping of class -> (fpr, tpr) arrays.
+    model_names:
+        Ordered collection of model identifiers to display.
+    classes:
+        All available class labels.
+    filterclasses:
+        Optional subset of ``classes`` to visualise.
+    outputpath:
+        Optional path where the combined figure should be written.
+    dpi:
+        Resolution for the saved figure.
+
+    Returns
+    -------
+    plt.Figure | None
+        The combined Matplotlib Figure or ``None`` if no curves could be plotted.
+    """
+    if filterclasses is not None:
+        selected_classes = [cls for cls in classes if cls in filterclasses]
+    else:
+        selected_classes = list(classes)
+
+    if not selected_classes:
+        raise ValueError("No classes available for ROC plotting with given filter.")
+    if not model_names:
+        raise ValueError("At least one model name is required for ROC plotting.")
+
+    for model in model_names:
+        if model not in models_roc_data:
+            raise ValueError(f"Model '{model}' not found in ROC data.")
+
+    num_classes = len(selected_classes)
+    if num_classes <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, 20))[:num_classes]
+    else:
+        colors = plt.cm.rainbow(np.linspace(0, 1, num_classes))
+    color_map = {cls: colors[idx] for idx, cls in enumerate(selected_classes)}
+
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+    num_models = len(model_names)
+    fig, axes = plt.subplots(1, num_models, figsize=(6.5 * num_models, 6))
+
+    if num_models == 1:
+        axes = [axes]
+
+    fig.suptitle("ROC Curves per Category for Each Model", fontsize=16, y=1.02)
+    has_curve = False
+
+    for model_idx, model in enumerate(model_names):
+        ax = axes[model_idx]
+        roc_data = models_roc_data[model]
+
+        for cls in selected_classes:
+            if cls not in roc_data:
+                continue
+            fpr, tpr = roc_data[cls]
+            auc_score = auc(fpr, tpr)
+            ax.plot(
+                fpr,
+                tpr,
+                color=color_map[cls],
+                linewidth=2,
+                label=f"{cls} (AUC={auc_score:.3f})",
+            )
+            has_curve = True
+
+        ax.plot([0, 1], [0, 1], "k--", linewidth=1.5, label="Random (AUC=0.5)")
+        format_roc_figure(ax, f"Model {model}")
+        ax.set_xlim(-0.05, 1.05)
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(loc="lower right", fontsize=9)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+    if not has_curve:
+        plt.close(fig)
+        return None
+
+    if outputpath is not None:
+        path = _ensure_output_dir(Path(outputpath))
+        if path is not None:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+
+    return fig
+
+
+def create_inline_roc_display(
+    roc_df,
+    classes: Iterable[str],
+    filter_classes: Iterable[str] | None = None,
+    output_prefix: str | None = None,
+) -> dict[str, plt.Figure]:
+    """
+    Prepare ROC figures for Streamlit display.
+
+    Parameters
+    ----------
+    roc_df:
+        DataFrame with index of class names and a column ``roc_curve`` containing
+        (fpr, tpr) arrays. Additional columns (e.g., AUC) are ignored.
+    classes:
+        Ordered iterable of class names.
+    filter_classes:
+        Optional subset of classes to visualise.
+    output_prefix:
+        Optional prefix for saved figures.
+    """
+    if "roc_curve" not in roc_df.columns:
+        raise ValueError("roc_df must contain a 'roc_curve' column.")
+
+    roc_data = {
+        cls: roc_df.loc[cls, "roc_curve"]
+        for cls in roc_df.index
+        if isinstance(roc_df.loc[cls, "roc_curve"], tuple)
+    }
+
+    figures = plot_per_class_roc(
+        roc_data=roc_data,
+        classes=classes,
+        filter_classes=filter_classes,
+        output_prefix=output_prefix,
+    )
+    return figures
+
+
+__all__ = [
+    "create_inline_roc_display",
+    "format_roc_figure",
+    "plot_confusion_matrix_raw",
+    "plot_per_class_roc",
+    "plotcombinedrocallmodels",
+]
+</file>
+
+<file path="app/utils/thresholds.py">
+"""
+Thresholding utilities for transforming activated class scores into predictions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_curve
+
+from app.utils.activations import ActivationType, apply_activation
+
+
+@dataclass(frozen=True)
+class ThresholdResult:
+    """Container returned by ``predict_with_thresholds``."""
+
+    predictions: np.ndarray
+    activated_scores: np.ndarray
+    mask: np.ndarray
+    masked_scores: np.ndarray
+
+
+def _ensure_2d_scores(scores: np.ndarray | Sequence[Sequence[float]]) -> np.ndarray:
+    array = np.asarray(scores, dtype=np.float64)
+    if array.ndim != 2:
+        raise ValueError(
+            "Score matrix must be 2-dimensional with shape (n_samples, n_classes)."
+        )
+    return array
+
+
+def _normalise_classes(classes: Iterable) -> tuple:
+    classes_tuple = tuple(classes)
+    if not classes_tuple:
+        raise ValueError("Classes iterable cannot be empty.")
+    return classes_tuple
+
+
+def _build_threshold_array(
+    thresholds: Mapping[str, float] | Sequence[float] | float | np.ndarray | None,
+    classes: Sequence[str],
+    default: float = 0.0,
+) -> np.ndarray:
+    classes = list(classes)
+
+    if thresholds is None:
+        return np.full((1, len(classes)), float(default), dtype=np.float64)
+
+    if isinstance(thresholds, Mapping):
+        # Cast thresholds to proper type
+        thresh_dict: dict[str, float | int] = dict(thresholds)  # type: ignore
+        return np.array(
+            [[float(thresh_dict.get(cls, default)) for cls in classes]],
+            dtype=np.float64,
+        )
+
+    if np.isscalar(thresholds):
+        return np.full((1, len(classes)), float(thresholds), dtype=np.float64)
+
+    threshold_arr = np.asarray(thresholds, dtype=np.float64)
+    if threshold_arr.ndim == 1 and threshold_arr.shape[0] == len(classes):
+        return threshold_arr[np.newaxis, :]
+
+    if threshold_arr.ndim == 2:
+        if threshold_arr.shape == (1, len(classes)):
+            return threshold_arr
+        if threshold_arr.shape == (len(classes), 1):
+            return threshold_arr.T
+        if threshold_arr.shape == (len(classes), len(classes)):
+            return np.diag(threshold_arr)[np.newaxis, :]
+
+    raise ValueError(
+        "Thresholds must be a scalar, mapping, or iterable compatible with class length."
+    )
+
+
+def predict_with_thresholds(
+    scores: np.ndarray | Sequence[Sequence[float]],
+    classes: Iterable[str],
+    thresholds: Mapping[str, float] | Sequence[float] | float | None = None,
+    activation: ActivationType | str | None = "none",
+    fallback_class: str | None = None,
+) -> ThresholdResult:
+    """
+    Apply activation + thresholding and obtain final class predictions.
+
+    Parameters
+    ----------
+    scores:
+        Raw score matrix shaped (n_samples, n_classes).
+    classes:
+        Iterable of class labels corresponding to the score columns.
+    thresholds:
+        Scalar, iterable, or mapping providing per-class thresholds.
+    activation:
+        Activation function to apply before thresholding.
+    fallback_class:
+        Class used when no thresholds are exceeded. Defaults to the first class.
+
+    Returns
+    -------
+    ThresholdResult
+        Dataclass containing predictions, activated scores, threshold mask, and masked scores.
+    """
+    class_labels = _normalise_classes(classes)
+    raw_scores = _ensure_2d_scores(scores)
+
+    activated = apply_activation(raw_scores, activation)
+    threshold_array = _build_threshold_array(thresholds, class_labels, default=0.0)
+    mask = apply_thresholds(activated, threshold_array, class_labels)
+    masked_scores = np.where(mask, activated, -np.inf)
+
+    predictions = select_predicted_class(
+        masked_scores, fallback_class=fallback_class, classes=class_labels
+    )
+
+    return ThresholdResult(
+        predictions=predictions,
+        activated_scores=activated,
+        mask=mask,
+        masked_scores=masked_scores,
+    )
+
+
+def compute_optimal_thresholds_youden(
+    y_true: Sequence,
+    y_scores: np.ndarray | Sequence[Sequence[float]],
+    classes: Iterable[str],
+) -> pd.DataFrame:
+    """
+    Compute per-class thresholds maximising Youden's J statistic (TPR - FPR).
+    """
+    y_true_series = pd.Series(list(y_true))
+    scores = _ensure_2d_scores(y_scores)
+    class_labels = _normalise_classes(classes)
+
+    if scores.shape[0] != len(y_true_series):
+        raise ValueError(
+            "y_scores and y_true must have the same number of rows/samples."
+        )
+    if scores.shape[1] != len(class_labels):
+        raise ValueError(
+            "y_scores column count must match the length of the classes iterable."
+        )
+
+    results = []
+    for idx, cls in enumerate(class_labels):
+        binary_true = (y_true_series == cls).astype(int)
+
+        positives = int(binary_true.sum())
+        negatives = len(binary_true) - positives
+
+        if positives == 0 or negatives == 0:
+            results.append(
+                {
+                    "class": cls,
+                    "optimal_threshold": np.nan,
+                    "youden_j": np.nan,
+                    "tpr": 0.0,
+                    "fpr": 1.0 if positives == 0 else 0.0,
+                    "support_pos": positives,
+                    "support_neg": negatives,
+                }
+            )
+            continue
+
+        fpr, tpr, thresholds = roc_curve(binary_true, scores[:, idx])
+        youden_j = tpr - fpr
+        best_idx = np.nanargmax(youden_j)
+        results.append(
+            {
+                "class": cls,
+                "optimal_threshold": float(thresholds[best_idx]),
+                "youden_j": float(youden_j[best_idx]),
+                "tpr": float(tpr[best_idx]),
+                "fpr": float(fpr[best_idx]),
+                "support_pos": positives,
+                "support_neg": negatives,
+            }
+        )
+
+    return pd.DataFrame(results).set_index("class")
+
+
+def apply_thresholds(
+    scores: np.ndarray | Sequence[Sequence[float]],
+    thresholds: Mapping[str, float] | Sequence[float] | float | np.ndarray,
+    classes: Iterable[str],
+) -> np.ndarray:
+    """
+    Produce a boolean mask where scores meet/exceed the specified thresholds.
+    """
+    class_labels = _normalise_classes(classes)
+    activated = _ensure_2d_scores(scores)
+    threshold_array = _build_threshold_array(thresholds, class_labels, default=0.0)
+
+    return activated >= threshold_array
+
+
+def select_predicted_class(
+    masked_scores: np.ndarray | pd.DataFrame,
+    fallback_class: str | None,
+    classes: Iterable[str] | None = None,
+) -> np.ndarray:
+    """
+    Choose the predicted class from masked scores (values below threshold set to -inf).
+    """
+    if isinstance(masked_scores, pd.DataFrame):
+        scores_array = masked_scores.to_numpy(dtype=np.float64, copy=False)
+        inferred_classes = tuple(str(col) for col in masked_scores.columns)
+    else:
+        scores_array = np.asarray(masked_scores, dtype=np.float64)
+        inferred_classes = tuple(classes) if classes is not None else None
+
+    if scores_array.ndim != 2:
+        raise ValueError("masked_scores must be a 2D array-like.")
+    if inferred_classes is None or len(inferred_classes) != scores_array.shape[1]:
+        raise ValueError(
+            "Class labels must be provided when masked_scores lacks column metadata."
+        )
+
+    if fallback_class is None:
+        fallback_class = inferred_classes[0]
+
+    best_indices = np.argmax(scores_array, axis=1)
+    has_valid = np.isfinite(scores_array).any(axis=1)
+
+    predictions = np.array(
+        [inferred_classes[idx] for idx in best_indices], dtype=object
+    )
+    predictions[~has_valid] = fallback_class
+    return predictions
+
+
+__all__ = [
+    "ThresholdResult",
+    "apply_thresholds",
+    "compute_optimal_thresholds_youden",
+    "predict_with_thresholds",
+    "select_predicted_class",
+]
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "threshold-cutter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "altair>=5.5.0",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "plotly>=6.3.1",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "streamlit>=1.51.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+addopts = "-ra -q"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "ruff>=0.14.3",
+    "ty>=0.0.1a25",
+    "watchdog>=6.0.0",
+]
+</file>
+
+<file path="app/utils/data_io.py">
+"""
+Data ingestion and validation helpers.
+
+Supports both "wide" (one row per sample with ``logit_{class}`` columns) and
+"long" (multiple rows per sample with ``predicted_category``/``logit_score``)
+table layouts.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Literal, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+ROW_INDEX_COLUMN = "__row_id__"
+WIDE_PREFIXES = ("logit_", "score_", "prob_", "p_")
+CLASS_COLUMN_CANDIDATES = (
+    "class",
+    "label",
+    "category",
+    "predicted_category",
+    "target_class",
+)
+SCORE_COLUMN_CANDIDATES = (
+    "logit_score",
+    "score",
+    "probability",
+    "value",
+    "confidence",
+)
+SAMPLE_ID_COLUMN_CANDIDATES = (
+    "sample_id",
+    "id",
+    "row_id",
+    "record_id",
+    "observation_id",
+)
+TRUE_LABEL_COLUMN_CANDIDATES = (
+    "true_label",
+    "label",
+    "actual",
+    "ground_truth",
+    "target",
+    "response",
+    "y_true",
+)
+
+SCORE_CLIP_ABS = 1e12
+MISSING_SCORE_FILL_VALUE = -SCORE_CLIP_ABS
+
+
+@dataclass(frozen=True)
+class ColumnSelection:
+    format: Literal["wide", "long"]
+    true_label: str
+    wide_score_columns: tuple[str, ...] = ()
+    long_class_column: str | None = None
+    long_score_column: str | None = None
+    sample_id_column: str | None = None
+
+
+@dataclass(frozen=True)
+class ColumnCandidates:
+    default_format: Literal["wide", "long"]
+    true_label_options: tuple[str, ...]
+    true_label_default: str
+    long_class_options: tuple[str, ...]
+    long_class_default: str | None
+    long_score_options: tuple[str, ...]
+    long_score_default: str | None
+    sample_id_options: tuple[str, ...]
+    sample_id_default: str | None
+    wide_score_options: tuple[str, ...]
+    wide_score_default: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DataMetadata:
+    """Descriptor returned by ``validate_data``."""
+
+    format: Literal["wide", "long"]
+    classes: tuple[str, ...]
+    class_to_column: Mapping[str, str]
+    true_label_column: str
+    long_class_column: str | None = None
+    long_score_column: str | None = None
+    sample_id_column: str | None = None
+
+
+def load_csv(
+    file_path: str | Path,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
+    **read_csv_kwargs,
+) -> pd.DataFrame:
+    """
+    Load a CSV file with optional delimiter detection.
+
+    Parameters
+    ----------
+    file_path:
+        Path to the CSV file.
+    delimiter:
+        Optional delimiter override. If omitted the function attempts to sniff
+        the delimiter from the first non-empty line.
+    encoding:
+        File encoding passed to :func:`pandas.read_csv`.
+    read_csv_kwargs:
+        Extra keyword arguments forwarded to :func:`pandas.read_csv`.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"CSV file not found: {path}")
+
+    sep = delimiter or _sniff_delimiter(path)
+    df = pd.read_csv(path, sep=sep, encoding=encoding, **read_csv_kwargs)
+    if df.empty:
+        raise ValueError("Loaded CSV is empty; please provide a dataset with rows.")
+    return df
+
+
+def _sniff_delimiter(path: Path) -> str:
+    sample_bytes = path.read_bytes()
+    first_chunk = sample_bytes.splitlines()
+    for line in first_chunk:
+        if not line:
+            continue
+        decoded = line.decode("utf-8", errors="ignore")
+        for candidate in [",", "\t", ";", "|"]:
+            if candidate in decoded:
+                return candidate
+    return ","
+
+
+def infer_column_candidates(df: pd.DataFrame) -> ColumnCandidates:
+    """
+    Inspect the dataframe and propose sensible default column mappings.
+    """
+    columns = list(df.columns)
+    if not columns:
+        raise ValueError(
+            "Column inference requires a dataframe with at least one column."
+        )
+
+    numeric_columns = list(df.select_dtypes(include=[np.number]).columns)
+    string_like = list(
+        df.select_dtypes(include=["object", "string", "category"]).columns
+    )
+    column_lookup = {col.lower(): col for col in columns}
+
+    true_label_default = _pick_first_available(
+        column_lookup, TRUE_LABEL_COLUMN_CANDIDATES
+    )
+    if true_label_default is None:
+        true_label_default = string_like[0] if string_like else columns[0]
+    true_label_options = tuple(columns)
+
+    long_class_candidates = [col for col in string_like if col != true_label_default]
+    if not long_class_candidates:
+        long_class_candidates = [col for col in columns if col != true_label_default]
+    long_class_lookup = {col.lower(): col for col in long_class_candidates}
+    long_class_default = _pick_first_available(
+        long_class_lookup, CLASS_COLUMN_CANDIDATES
+    )
+    if long_class_default is None and long_class_candidates:
+        long_class_default = long_class_candidates[0]
+
+    long_score_candidates = [
+        col for col in numeric_columns if col != true_label_default
+    ]
+    if not long_score_candidates:
+        long_score_candidates = [col for col in columns if col != true_label_default]
+    long_score_lookup = {col.lower(): col for col in long_score_candidates}
+    long_score_default = _pick_first_available(
+        long_score_lookup, SCORE_COLUMN_CANDIDATES
+    )
+    if long_score_default is None and long_score_candidates:
+        long_score_default = long_score_candidates[0]
+
+    sample_id_candidates = [col for col in columns if col != true_label_default]
+    sample_id_string_like = [
+        col
+        for col in sample_id_candidates
+        if col in string_like or pd.api.types.is_integer_dtype(df[col])
+    ]
+    if sample_id_string_like:
+        sample_id_candidates = sample_id_string_like
+    sample_id_lookup = {col.lower(): col for col in sample_id_candidates}
+    sample_id_default = _pick_first_available(
+        sample_id_lookup, SAMPLE_ID_COLUMN_CANDIDATES
+    )
+
+    detected_wide = list(_auto_detect_wide_columns(df, true_label_default))
+    wide_score_default = tuple(dict.fromkeys(detected_wide))
+    wide_score_candidates = [
+        col for col in numeric_columns if col != true_label_default
+    ]
+    if not wide_score_candidates:
+        wide_score_candidates = [col for col in columns if col != true_label_default]
+    wide_score_options = tuple(wide_score_candidates)
+
+    default_format: Literal["wide", "long"] = (
+        "wide" if len(wide_score_default) >= 2 else "long"
+    )
+
+    return ColumnCandidates(
+        default_format=default_format,
+        true_label_options=true_label_options,
+        true_label_default=true_label_default,
+        long_class_options=tuple(long_class_candidates),
+        long_class_default=long_class_default,
+        long_score_options=tuple(long_score_candidates),
+        long_score_default=long_score_default,
+        sample_id_options=tuple(sample_id_candidates),
+        sample_id_default=sample_id_default,
+        wide_score_options=wide_score_options,
+        wide_score_default=wide_score_default,
+    )
+
+
+def validate_data(
+    df: pd.DataFrame,
+    column_selection: ColumnSelection | None = None,
+) -> DataMetadata:
+    """
+    Validate a dataframe and infer metadata needed for downstream processing.
+    """
+    if df.empty:
+        raise ValueError("Input data must contain at least one row.")
+
+    column_lookup = {col.lower(): col for col in df.columns}
+
+    if column_selection:
+        true_label_column = column_selection.true_label
+        if true_label_column not in df.columns:
+            raise ValueError(
+                f"Selected true label column '{true_label_column}' is not present in the dataset."
+            )
+    else:
+        true_label_column = _pick_first_available(
+            column_lookup, TRUE_LABEL_COLUMN_CANDIDATES
+        )
+        if true_label_column is None:
+            string_candidates = list(
+                df.select_dtypes(include=["object", "string", "category"]).columns
+            )
+            if not string_candidates:
+                raise ValueError(
+                    "Input data must contain a string-like true label column or you must specify one explicitly."
+                )
+            true_label_column = string_candidates[0]
+
+    sample_id_column = (
+        column_selection.sample_id_column
+        if column_selection and column_selection.sample_id_column
+        else _pick_first_available(column_lookup, SAMPLE_ID_COLUMN_CANDIDATES)
+    )
+    if sample_id_column and sample_id_column not in df.columns:
+        raise ValueError(
+            f"Selected sample identifier column '{sample_id_column}' is not present in the dataset."
+        )
+    if sample_id_column == true_label_column:
+        sample_id_column = None
+
+    force_format = column_selection.format if column_selection else None
+
+    wide_columns: Sequence[str] = ()
+    if force_format == "wide":
+        wide_columns = (
+            column_selection.wide_score_columns if column_selection else ()
+        ) or _auto_detect_wide_columns(df, true_label_column)
+    elif force_format != "long":
+        wide_columns = _auto_detect_wide_columns(df, true_label_column)
+
+    if wide_columns:
+        missing = [col for col in wide_columns if col not in df.columns]
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+            raise ValueError(
+                f"Selected score columns not found in dataframe: {missing_str}"
+            )
+        wide_map = _build_wide_map_from_columns(wide_columns)
+        if not wide_map:
+            raise ValueError("No class score columns detected for wide-format data.")
+        _validate_numeric_columns(df, wide_map.values())
+        classes = tuple(wide_map.keys())
+        return DataMetadata(
+            format="wide",
+            classes=classes,
+            class_to_column=wide_map,
+            true_label_column=true_label_column,
+            sample_id_column=sample_id_column,
+        )
+
+    if force_format == "wide":
+        raise ValueError(
+            "Wide-format data requires at least one numeric score column. "
+            "Select the relevant columns or provide data in long format."
+        )
+
+    class_column = (
+        column_selection.long_class_column
+        if column_selection and column_selection.format == "long"
+        else _pick_first_available(column_lookup, CLASS_COLUMN_CANDIDATES)
+    )
+    if class_column is None or class_column not in df.columns:
+        raise ValueError(
+            "Unable to infer class column for long-format data. "
+            "Select a column containing predicted class labels."
+        )
+
+    score_column = (
+        column_selection.long_score_column
+        if column_selection and column_selection.format == "long"
+        else _pick_first_available(column_lookup, SCORE_COLUMN_CANDIDATES)
+    )
+    if score_column is None or score_column not in df.columns:
+        raise ValueError(
+            "Unable to infer score column for long-format data. "
+            "Select a numeric column containing class scores."
+        )
+
+    _validate_numeric_columns(df, [score_column])
+
+    classes_series = df[class_column].astype("string", copy=False).dropna()
+    classes = tuple(classes_series.unique())
+    if not classes:
+        raise ValueError(
+            "No class labels detected in column "
+            f"'{class_column}'. Ensure the column contains non-null values."
+        )
+
+    return DataMetadata(
+        format="long",
+        classes=classes,
+        class_to_column={},
+        true_label_column=true_label_column,
+        long_class_column=class_column,
+        long_score_column=score_column,
+        sample_id_column=sample_id_column,
+    )
+
+
+def prepare_score_matrix(
+    df: pd.DataFrame,
+    classes: Iterable[str] | None = None,
+    metadata: DataMetadata | None = None,
+    return_index: bool = False,
+) -> np.ndarray | tuple[np.ndarray, pd.Index]:
+    """
+    Convert the dataframe into a dense score matrix of shape (n_samples, n_classes).
+
+    Parameters
+    ----------
+    df:
+        Source dataframe containing score columns.
+    classes:
+        Optional explicit class ordering.
+    metadata:
+        Pre-computed metadata from :func:`validate_data`.
+    return_index:
+        When True, also return the row index used to align the resulting matrix.
+    """
+    metadata = metadata or validate_data(df)
+    classes_tuple = tuple(classes) if classes else metadata.classes
+
+    index_values: pd.Index | None = None
+
+    if metadata.format == "wide":
+        ordered_columns = [metadata.class_to_column[cls] for cls in classes_tuple]
+        scores = df.loc[:, ordered_columns].to_numpy(dtype=np.float64, copy=False)
+        index_values = df.index
+    else:
+        class_column = metadata.long_class_column
+        score_column = metadata.long_score_column
+        if class_column is None or score_column is None:
+            raise RuntimeError(
+                "Long-format metadata missing required column references."
+            )
+
+        working_df = df.copy()
+        index_column = metadata.sample_id_column
+        if index_column is None:
+            working_df[ROW_INDEX_COLUMN] = np.arange(len(working_df), dtype=np.int64)
+            index_column = ROW_INDEX_COLUMN
+
+        pivot = (
+            working_df.pivot_table(
+                index=index_column,
+                columns=class_column,
+                values=score_column,
+                aggfunc="first",
+            )
+            .reindex(columns=classes_tuple)
+            .sort_index()
+        )
+
+        pivot = pivot.astype(np.float64)
+        pivot = pivot.fillna(np.nan)
+        scores = pivot.to_numpy(dtype=np.float64, copy=False)
+        index_values = pivot.index
+
+    processed = handle_missing_scores(scores)
+    if return_index:
+        assert index_values is not None
+        return processed, index_values
+    return processed
+
+
+def handle_missing_scores(scores: np.ndarray | pd.DataFrame) -> np.ndarray:
+    """
+    Sanitise score matrices by replacing NaN/Inf values with large finite sentinels.
+
+    This prevents downstream routines (e.g. ``roc_curve``) from failing while still
+    ensuring missing scores are ignored after activation/thresholding.
+    """
+    array = np.asarray(scores, dtype=np.float64)
+    np.nan_to_num(
+        array,
+        nan=MISSING_SCORE_FILL_VALUE,
+        posinf=SCORE_CLIP_ABS,
+        neginf=MISSING_SCORE_FILL_VALUE,
+        copy=False,
+    )
+    np.clip(array, -SCORE_CLIP_ABS, SCORE_CLIP_ABS, out=array)
+    return array
+
+
+_majority_cache: dict[tuple, object] = {}
+
+
+def get_majority_class(y_true: Iterable) -> object:
+    """
+    Compute and cache the majority (mode) class label.
+
+    Uses a lightweight dictionary cache keyed by a tuple representation of the
+    labels. This avoids repeated passes over large datasets when threshold
+    updates request the fallback class frequently.
+    """
+    values = tuple(pd.Series(y_true).tolist())
+    if not values:
+        raise ValueError("Cannot compute majority class from empty labels.")
+    cached = _majority_cache.get(values)
+    if cached is not None:
+        return cached
+
+    counts = pd.Series(values).value_counts()
+    majority = counts.idxmax()
+    _majority_cache[values] = majority
+    return majority
+
+
+def _derive_class_name(column: str) -> str:
+    lower = column.lower()
+    for prefix in WIDE_PREFIXES:
+        if lower.startswith(prefix):
+            name = column[len(prefix) :].strip()
+            if name:
+                return name
+    return column
+
+
+def _build_wide_map_from_columns(columns: Sequence[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for column in columns:
+        class_name = _derive_class_name(column)
+        if class_name in mapping:
+            raise ValueError(
+                f"Ambiguous class mapping detected for column '{column}'. "
+                f"The derived class name '{class_name}' is duplicated."
+            )
+        mapping[class_name] = column
+    return mapping
+
+
+def _auto_detect_wide_columns(
+    df: pd.DataFrame, true_label_column: str
+) -> tuple[str, ...]:
+    detected: list[str] = []
+    for column in df.columns:
+        if column == true_label_column:
+            continue
+        lower = column.lower()
+        for prefix in WIDE_PREFIXES:
+            if lower.startswith(prefix):
+                detected.append(column)
+                break
+    return tuple(detected)
+
+
+def _validate_numeric_columns(df: pd.DataFrame, columns: Iterable[str]) -> None:
+    for column in columns:
+        if column not in df.columns:
+            raise KeyError(f"Column '{column}' not found in dataframe.")
+        if not pd.api.types.is_numeric_dtype(df[column]):
+            raise TypeError(
+                f"Column '{column}' must contain numeric scores for activation/thresholding."
+            )
+
+
+def _pick_first_available(
+    column_lookup: Mapping[str, str], candidates: Iterable[str]
+) -> str | None:
+    for candidate in candidates:
+        if candidate in column_lookup:
+            return column_lookup[candidate]
+    return None
+
+
+__all__ = [
+    "ColumnCandidates",
+    "ColumnSelection",
+    "DataMetadata",
+    "ROW_INDEX_COLUMN",
+    "handle_missing_scores",
+    "infer_column_candidates",
+    "load_csv",
+    "prepare_score_matrix",
+    "validate_data",
+    "get_majority_class",
+]
+</file>
+
+</files>

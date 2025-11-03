@@ -13,7 +13,7 @@ import numpy as np
 import seaborn as sns
 from matplotlib.colors import PowerNorm
 from matplotlib.ticker import MaxNLocator
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import auc, confusion_matrix
 
 sns.set_theme(context="notebook", style="whitegrid")
 
@@ -110,9 +110,12 @@ def plot_per_class_roc(
     layout: tuple[int, int] | None = None,
     output_prefix: str | None = None,
     dpi: int = 300,
-) -> dict[str, MplFigure]:  # Specify return type explicitly
+) -> dict[str, MplFigure]:
     """
     Create individual or multi-panel ROC curves from pre-computed ROC data.
+
+    Uses the tab20 colour palette (up to 20 classes) with a rainbow fallback
+    and appends AUC scores to legend entries for improved readability.
     """
     class_order = [cls for cls in classes if cls in roc_data]
     if filter_classes is not None:
@@ -122,7 +125,14 @@ def plot_per_class_roc(
     if not class_order:
         raise ValueError("No classes available for ROC plotting with given filter.")
 
-    figures: dict[str, MplFigure] = {}  # Explicitly typed
+    num_classes = len(class_order)
+    if num_classes <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, 20))[:num_classes]
+    else:
+        colors = plt.cm.rainbow(np.linspace(0, 1, num_classes))
+    color_map = {cls: colors[idx] for idx, cls in enumerate(class_order)}
+
+    figures: dict[str, MplFigure] = {}
     needs_save = output_prefix is not None
     output_prefix = output_prefix or "roc"
 
@@ -133,7 +143,7 @@ def plot_per_class_roc(
         rows, cols = layout
 
     plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
-    multi_fig = None
+    multi_fig: MplFigure | None = None
     multi_axes = None
     create_multi = len(class_order) > 1
 
@@ -146,26 +156,31 @@ def plot_per_class_roc(
 
     for idx, cls in enumerate(class_order):
         fpr, tpr = roc_data[cls]
-        if create_multi:
-            ax = axes_iter[idx]
-        else:
-            ax = axes_iter[0]
+        ax = axes_iter[idx] if create_multi else axes_iter[0]
 
-        ax.plot(fpr, tpr, label=f"{cls} ROC")
+        auc_score = auc(fpr, tpr)
+        ax.plot(
+            fpr,
+            tpr,
+            color=color_map[cls],
+            linewidth=2,
+            label=f"{cls} (AUC={auc_score:.3f})",
+        )
         ax.plot([0, 1], [0, 1], linestyle="--", color="grey", alpha=0.7)
         format_roc_figure(ax, f"ROC Curve — {cls}")
 
-        fig = ax.get_figure()
-        if fig is not None and isinstance(fig, MplFigure):
-            figures[str(cls)] = fig  # Ensure string key
-
-            if needs_save:
-                filename = (
-                    FIGURE_DIR / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
-                )
-                path = _ensure_output_dir(filename)
-                if path is not None:
-                    fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
+        if not create_multi:
+            fig = ax.get_figure()
+            if fig is not None and isinstance(fig, MplFigure):
+                figures[str(cls)] = fig
+                if needs_save:
+                    filename = (
+                        FIGURE_DIR
+                        / f"{_snake_case(output_prefix)}_{_snake_case(cls)}.png"
+                    )
+                    path = _ensure_output_dir(filename)
+                    if path is not None:
+                        fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
 
     if create_multi:
         for idx in range(len(class_order), len(axes_iter)):
@@ -180,6 +195,106 @@ def plot_per_class_roc(
             figures["combined"] = multi_fig
 
     return figures
+
+
+def plotcombinedrocallmodels(
+    models_roc_data: Mapping[str, Mapping[str, tuple[np.ndarray, np.ndarray]]],
+    model_names: Sequence[str],
+    classes: Sequence[str],
+    filterclasses: Sequence[str] | None = None,
+    outputpath: str | Path | None = None,
+    dpi: int = 300,
+) -> plt.Figure | None:
+    """
+    Render side-by-side ROC curves for multiple models, reusing class colours.
+
+    Parameters
+    ----------
+    models_roc_data:
+        Mapping of model name -> mapping of class -> (fpr, tpr) arrays.
+    model_names:
+        Ordered collection of model identifiers to display.
+    classes:
+        All available class labels.
+    filterclasses:
+        Optional subset of ``classes`` to visualise.
+    outputpath:
+        Optional path where the combined figure should be written.
+    dpi:
+        Resolution for the saved figure.
+
+    Returns
+    -------
+    plt.Figure | None
+        The combined Matplotlib Figure or ``None`` if no curves could be plotted.
+    """
+    if filterclasses is not None:
+        selected_classes = [cls for cls in classes if cls in filterclasses]
+    else:
+        selected_classes = list(classes)
+
+    if not selected_classes:
+        raise ValueError("No classes available for ROC plotting with given filter.")
+    if not model_names:
+        raise ValueError("At least one model name is required for ROC plotting.")
+
+    for model in model_names:
+        if model not in models_roc_data:
+            raise ValueError(f"Model '{model}' not found in ROC data.")
+
+    num_classes = len(selected_classes)
+    if num_classes <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, 20))[:num_classes]
+    else:
+        colors = plt.cm.rainbow(np.linspace(0, 1, num_classes))
+    color_map = {cls: colors[idx] for idx, cls in enumerate(selected_classes)}
+
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+    num_models = len(model_names)
+    fig, axes = plt.subplots(1, num_models, figsize=(6.5 * num_models, 6))
+
+    if num_models == 1:
+        axes = [axes]
+
+    fig.suptitle("ROC Curves per Category for Each Model", fontsize=16, y=1.02)
+    has_curve = False
+
+    for model_idx, model in enumerate(model_names):
+        ax = axes[model_idx]
+        roc_data = models_roc_data[model]
+
+        for cls in selected_classes:
+            if cls not in roc_data:
+                continue
+            fpr, tpr = roc_data[cls]
+            auc_score = auc(fpr, tpr)
+            ax.plot(
+                fpr,
+                tpr,
+                color=color_map[cls],
+                linewidth=2,
+                label=f"{cls} (AUC={auc_score:.3f})",
+            )
+            has_curve = True
+
+        ax.plot([0, 1], [0, 1], "k--", linewidth=1.5, label="Random (AUC=0.5)")
+        format_roc_figure(ax, f"Model {model}")
+        ax.set_xlim(-0.05, 1.05)
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(loc="lower right", fontsize=9)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+    if not has_curve:
+        plt.close(fig)
+        return None
+
+    if outputpath is not None:
+        path = _ensure_output_dir(Path(outputpath))
+        if path is not None:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+
+    return fig
 
 
 def create_inline_roc_display(
@@ -226,4 +341,5 @@ __all__ = [
     "format_roc_figure",
     "plot_confusion_matrix_raw",
     "plot_per_class_roc",
+    "plotcombinedrocallmodels",
 ]
