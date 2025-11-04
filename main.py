@@ -23,11 +23,17 @@ from app.utils.exports import (
     generate_timestamp,
     save_classification_report,
     save_confusion_matrix_image,
+    save_optimal_metrics,
     save_predictions_csv,
     save_roc_images,
 )
 from app.utils.metrics import MetricSummary, create_metrics_summary
-from app.utils.plots import create_inline_roc_display, plot_confusion_matrix_raw
+from app.utils.plots import (
+    create_inline_roc_display,
+    plot_confusion_matrix_raw,
+    plot_confusion_matrix_norm,
+    # plot_combined_roc_all_models,   # ← new function
+)
 from app.utils.thresholds import (
     ThresholdResult,
     compute_optimal_thresholds_youden,
@@ -151,7 +157,7 @@ def get_threshold_bounds(activation: str) -> tuple[float, float, float]:
     activation = (activation or "none").lower()
     if activation in {"sigmoid", "sigmoid_5", "softmax"}:
         return 0.0, 1.0, 0.01
-    return 0.0, 25.0, 0.1
+    return 0.0, 40.0, 0.1
 
 
 def _align_true_labels(
@@ -233,6 +239,7 @@ def _build_prediction_dataframe(
             "predicted_class": y_pred,
         }
     )
+    classes = list(sorted(classes))
     for idx, cls in enumerate(classes):
         df[f"score_{cls}"] = activated_scores[:, idx]
     for cls, value in class_thresholds.items():
@@ -246,32 +253,32 @@ def _build_prediction_dataframe(
 def _render_metric_cards(summary: MetricSummary) -> None:
     st.markdown(
         """
-<div class="main-card metric-row">
-  <div class="metric-card">
-    <h3>Accuracy</h3>
-    <div class="value">{accuracy:.4f}</div>
-  </div>
-  <div class="metric-card">
-    <h3>Macro Precision</h3>
-    <div class="value">{precision:.4f}</div>
-  </div>
-  <div class="metric-card">
-    <h3>Macro Recall</h3>
-    <div class="value">{recall:.4f}</div>
-  </div>
-  <div class="metric-card">
-    <h3>Macro F1</h3>
-    <div class="value">{f1:.4f}</div>
-  </div>
-</div>
-""".format(
-            accuracy=summary.accuracy,
-            precision=summary.macro_precision,
-            recall=summary.macro_recall,
-            f1=summary.macro_f1,
-        ),
-        unsafe_allow_html=True,
-    )
+            <div class="main-card metric-row">
+            <div class="metric-card">
+                <h3>Accuracy</h3>
+                <div class="value">{accuracy:.4f}</div>
+            </div>
+            <div class="metric-card">
+                <h3>Macro Precision</h3>
+                <div class="value">{precision:.4f}</div>
+            </div>
+            <div class="metric-card">
+                <h3>Macro Recall</h3>
+                <div class="value">{recall:.4f}</div>
+            </div>
+            <div class="metric-card">
+                <h3>Macro F1</h3>
+                <div class="value">{f1:.4f}</div>
+            </div>
+            </div>
+        """.format(
+                    accuracy=summary.accuracy,
+                    precision=summary.macro_precision,
+                    recall=summary.macro_recall,
+                    f1=summary.macro_f1,
+                ),
+                unsafe_allow_html=True,
+            )
 
 
 def _render_youden_table(
@@ -344,7 +351,8 @@ def _handle_downloads(
     predictions_df: pd.DataFrame,
     thresholds_map: Mapping[str, float],
     classes: Sequence[str],
-    confusion_fig,
+    confusion_fig, 
+    confusion_fig_norm,
     roc_figures: Mapping[str, plt.Figure],
 ) -> None:
     st.sidebar.markdown("### Downloads")
@@ -369,9 +377,24 @@ def _handle_downloads(
         paths = save_classification_report(report, timestamp=timestamp)
         st.sidebar.success(f"Metrics saved: {paths['json'].name}, {paths['csv'].name}")
 
+    if st.sidebar.button("Save optimal metrics"):
+        paths = save_optimal_metrics(optimal_df, timestamp=timestamp)
+        st.sidebar.success(
+            f"Optimal metrics saved: {paths['json'].name}, {paths['csv'].name}"
+        )
+
     if st.sidebar.button("Save confusion matrix image"):
-        path = save_confusion_matrix_image(confusion_fig, timestamp=timestamp)
-        st.sidebar.success(f"Confusion matrix saved: {path.name}")
+        path = save_confusion_matrix_image(
+            confusion_fig, 
+            norm=False, 
+            timestamp=timestamp
+            )
+        path = save_confusion_matrix_image(
+            confusion_fig_norm, 
+            norm=True, 
+            timestamp=timestamp
+            )
+        st.sidebar.success(f"Confusion matrices saved: {path.name}")
 
     if st.sidebar.button("Save ROC figures"):
         paths = save_roc_images(dict(roc_figures), classes, timestamp=timestamp)
@@ -733,29 +756,39 @@ def main() -> None:
             key="global_threshold",
             disabled=auto_global,
         )
+        apply_global_threshold = st.checkbox(
+            label="Apply global threshold",
+            key="apply_global_threshold",
+            help="Use the global value for every class",
+        )
 
-        st.markdown("#### Per-class thresholds")
+        st.markdown("### Per-class thresholds")
         per_class_thresholds: dict[str, float] = {}
-        for cls in classes:
+        for cls in list(sorted(classes)):
             key = f"threshold_{cls}"
             if auto_per_class:
                 value = auto_threshold_map.get(cls, global_threshold)
+                st.session_state[key] = value
+            elif apply_global_threshold:
+                value = st.session_state.global_threshold
                 st.session_state[key] = value
             else:
                 st.session_state.setdefault(
                     key, class_thresholds_state.get(cls, global_threshold)
                 )
-            slider_value = st.slider(
+            number_value = st.number_input(
                 f"{cls}",
                 min_value=float(min_thr),
                 max_value=float(max_thr),
                 value=float(st.session_state[key]),
                 step=float(step_thr),
                 key=key,
-                disabled=auto_per_class,
+                disabled=auto_per_class or apply_global_threshold,
+                format="%.3f" 
             )
-            class_thresholds_state[cls] = float(slider_value)
-            per_class_thresholds[cls] = float(slider_value)
+
+            class_thresholds_state[cls] = float(number_value)
+            per_class_thresholds[cls] = float(number_value)
 
         st.markdown("#### Class filter")
         if any(cls not in classes for cls in st.session_state["class_filter"]):
@@ -816,9 +849,19 @@ def main() -> None:
         classes=selected_classes,
         f1_macro=summary.macro_f1,
     )
+    confusion_fig_norm = plot_confusion_matrix_norm(
+        filtered_true,
+        filtered_pred,
+        classes=selected_classes,
+        f1_macro=summary.macro_f1,
+    )
     st.markdown("### Confusion Matrix")
-    st.pyplot(confusion_fig, width="stretch")
+    st.pyplot(confusion_fig, width="content")
     plt.close(confusion_fig)
+
+    st.markdown("### Normalized Confusion Matrix")
+    st.pyplot(confusion_fig_norm, width="content")
+    plt.close(confusion_fig_norm)
 
     st.markdown("### ROC Curves")
     roc_figures = create_inline_roc_display(
@@ -827,7 +870,7 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if "combined" in roc_figures:
-        st.pyplot(roc_figures["combined"], width="stretch")
+        st.pyplot(roc_figures["combined"], width="content")
     for cls, fig in roc_figures.items():
         if cls == "combined":
             continue
@@ -846,7 +889,7 @@ def main() -> None:
         filter_classes=selected_classes,
     )
     if pr_fig is not None:
-        st.pyplot(pr_fig, width="stretch")
+        st.pyplot(pr_fig, width="content")
         plt.close(pr_fig)
     else:
         st.info(
@@ -860,6 +903,7 @@ def main() -> None:
         thresholds_map=per_class_thresholds,
         classes=classes,
         confusion_fig=confusion_fig,
+        confusion_fig_norm=confusion_fig_norm,
         roc_figures=roc_figures,
     )
 
