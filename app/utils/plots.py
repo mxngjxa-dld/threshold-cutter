@@ -36,7 +36,7 @@ def _snake_case(name: str) -> str:
     return safe.strip("_")
 
 
-def plot_confusion_matrix_raw(
+def plot_confusion_matrix_raw( #decomissioned method
     y_true: Sequence,
     y_pred: Sequence,
     classes: Sequence[str],
@@ -47,7 +47,7 @@ def plot_confusion_matrix_raw(
     """
     Render a confusion matrix heatmap styled for the Streamlit app.
     """
-    classes = list(classes)
+    classes = list(sorted(classes))
     matrix = confusion_matrix(y_true, y_pred, labels=classes)
 
     plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
@@ -85,6 +85,55 @@ def plot_confusion_matrix_raw(
 
     return fig
 
+def plot_confusion_matrix_norm( #decomissioned method
+    y_true: Sequence,
+    y_pred: Sequence,
+    classes: Sequence[str],
+    f1_macro: float | None = None,
+    output_path: str | Path | None = None,
+    dpi: int = 300,
+):
+    """
+    Render a confusion matrix heatmap styled for the Streamlit app.
+    """
+    classes = list(sorted(classes))
+    matrix = confusion_matrix(y_true, y_pred, labels=classes)
+    matrix_norm = matrix.astype('float') / matrix.sum(axis=1, keepdims=True)
+
+    plt.rcParams["font.family"] = DEFAULT_FONT_FAMILY
+
+    fig, ax = plt.subplots(figsize=(18, 15))
+    norm = PowerNorm(gamma=0.2)
+    sns.heatmap(
+        matrix_norm,
+        annot=True,
+        fmt=".4f",                # Show normalized values as floats
+        cmap="YlOrBr",
+        norm=norm,
+        cbar=True,
+        ax=ax,
+        linewidths=0.5,
+        linecolor="white",
+    )
+
+    ax.set_xlabel("Predicted class", fontweight="bold")
+    ax.set_ylabel("True class", fontweight="bold")
+    ax.set_xticklabels(classes, rotation=45, ha="right")
+    ax.set_yticklabels(classes, rotation=0)
+
+    title = "Confusion Matrix"
+    if f1_macro is not None:
+        title += f" (F1-Macro: {f1_macro:.4f})"
+    ax.set_title(title, fontweight="bold")
+
+    fig.tight_layout()
+
+    if output_path:
+        path = _ensure_output_dir(Path(output_path))
+        if path is not None:  # Type guard
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+
+    return fig
 
 def format_roc_figure(ax: plt.Axes, title: str | None = None) -> None:
     """
@@ -197,7 +246,7 @@ def plot_per_class_roc(
     return figures
 
 
-def plotcombinedrocallmodels(
+def plot_combined_roc_all_models(
     models_roc_data: Mapping[str, Mapping[str, tuple[np.ndarray, np.ndarray]]],
     model_names: Sequence[str],
     classes: Sequence[str],
@@ -243,6 +292,7 @@ def plotcombinedrocallmodels(
             raise ValueError(f"Model '{model}' not found in ROC data.")
 
     num_classes = len(selected_classes)
+    selected_classes = list(sorted(selected_classes))
     if num_classes <= 20:
         colors = plt.cm.tab20(np.linspace(0, 1, 20))[:num_classes]
     else:
@@ -340,6 +390,7 @@ __all__ = [
     "create_inline_roc_display",
     "format_roc_figure",
     "plot_confusion_matrix_raw",
+    "plot_confusion_matrix_norm",
     "plot_per_class_roc",
-    "plotcombinedrocallmodels",
+    "plot_combined_roc_all_models",
 ]
