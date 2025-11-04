@@ -217,3 +217,4 @@ __marimo__/
 data/
 synthetic_data/
 outputs/
+.DS_Store
